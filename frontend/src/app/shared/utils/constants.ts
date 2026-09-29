@@ -4,10 +4,6 @@ export const MAX_QUESTION_LENGTH = 500;
 /** Placeholder shown in the composer when it is empty. */
 export const QUESTION_PLACEHOLDER = 'Ask a question about company policies...';
 
-/** Disclaimer rendered under the composer. */
-export const GROUNDING_DISCLAIMER =
-  'Answers are grounded in verified company documents and always include sources.';
-
 /** Contact shown when an answer finds nothing. */
 export const HR_CONTACT_EMAIL = 'hr@company.com';
 
