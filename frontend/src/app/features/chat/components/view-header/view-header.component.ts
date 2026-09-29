@@ -8,6 +8,11 @@ import { IconComponent, type IconName } from '../../../../shared/components/icon
  * The header strip every view sits under: the sidebar toggle and the view
  * title, centred.
  *
+ * Below `lg` the sidebar is an overlay drawer, so the closed drawer cannot show
+ * the product name. The header stands in for it there, with the toggle on the
+ * trailing edge; from `lg` up the sidebar is on screen, so the header goes
+ * back to a centred title with the toggle on the leading edge.
+ *
  * It owns no state of its own; the toggle delegates to `LayoutService`.
  */
 @Component({
@@ -16,15 +21,27 @@ import { IconComponent, type IconName } from '../../../../shared/components/icon
   imports: [ButtonComponent, IconComponent],
   host: {
     class:
-      'relative flex shrink-0 items-center justify-center gap-3 border-b border-border bg-card px-4 py-4 sm:px-6 lg:px-8',
+      'relative flex shrink-0 items-center justify-between gap-3 border-b border-border bg-card px-4 py-5 sm:px-6 lg:justify-center lg:py-4 lg:px-8',
   },
   template: `
+    <span class="truncate font-headings text-base font-semibold text-foreground lg:hidden">
+      Knowledge Assistant
+    </span>
+
+    @if (title()) {
+      <h1
+        class="hidden min-w-0 truncate px-10 text-center font-headings text-base font-semibold text-foreground sm:text-lg lg:block"
+      >
+        {{ title() }}
+      </h1>
+    }
+
     <button
       app-button
       type="button"
       variant="ghost"
       size="icon"
-      class="absolute top-1/2 left-4 -translate-y-1/2 sm:left-6 lg:left-8"
+      class="ml-auto shrink-0 lg:absolute lg:top-1/2 lg:left-6 lg:ml-0 lg:-translate-y-1/2"
       [attr.aria-label]="layout.toggleLabel()"
       [attr.aria-expanded]="layout.isSidebarVisible()"
       aria-controls="app-sidebar"
@@ -32,14 +49,6 @@ import { IconComponent, type IconName } from '../../../../shared/components/icon
     >
       <app-icon [name]="toggleIcon()" [size]="18" />
     </button>
-
-    @if (title()) {
-      <h1
-        class="min-w-0 truncate px-10 text-center font-headings text-base font-semibold text-foreground sm:text-lg"
-      >
-        {{ title() }}
-      </h1>
-    }
   `,
 })
 export class ViewHeaderComponent {

@@ -10,19 +10,15 @@ import {
 } from '@angular/core';
 
 import { Message, SourceReference } from '../../../../core/models/message.model';
-import { AvatarComponent } from '../../../../shared/components/avatar/avatar.component';
 import { AnswerCardComponent } from '../answer-card/answer-card.component';
 import { AnswerNotFoundComponent } from '../answer-not-found/answer-not-found.component';
 import { AnswerPendingComponent } from '../answer-pending/answer-pending.component';
 import { MessageBubbleComponent } from '../message-bubble/message-bubble.component';
 
-/** Avatar shown beside every assistant turn. */
-const ASSISTANT_INITIALS = 'IK';
-
 /**
  * The conversation itself: user bubbles on the right, assistant turns on the
- * left with the avatar, and the right card per state (answer, no match, still
- * searching). It also keeps the newest turn in view as the thread grows.
+ * left with the right card per state (answer, no match, still searching). It
+ * also keeps the newest turn in view as the thread grows.
  */
 @Component({
   selector: 'app-chat-thread',
@@ -31,7 +27,6 @@ const ASSISTANT_INITIALS = 'IK';
     AnswerCardComponent,
     AnswerNotFoundComponent,
     AnswerPendingComponent,
-    AvatarComponent,
     MessageBubbleComponent,
   ],
   host: { class: 'flex min-h-0 flex-1 flex-col' },
@@ -48,26 +43,18 @@ const ASSISTANT_INITIALS = 'IK';
           @if (message.role === 'user') {
             <app-message-bubble [message]="message" />
           } @else {
-            <div class="flex gap-3">
-              <app-avatar
-                [initials]="assistantInitials"
-                tone="primary"
-                [size]="32"
-                [label]="'Assistant'"
-              />
-              <div class="min-w-0 flex-1">
-                @switch (message.status) {
-                  @case ('pending') {
-                    <app-answer-pending />
-                  }
-                  @case ('not-found') {
-                    <app-answer-not-found [message]="message" />
-                  }
-                  @default {
-                    <app-answer-card [message]="message" (viewed)="viewed.emit($event)" />
-                  }
+            <div class="min-w-0 flex-1">
+              @switch (message.status) {
+                @case ('pending') {
+                  <app-answer-pending />
                 }
-              </div>
+                @case ('not-found') {
+                  <app-answer-not-found [message]="message" />
+                }
+                @default {
+                  <app-answer-card [message]="message" (viewed)="viewed.emit($event)" />
+                }
+              }
             </div>
           }
         }
@@ -81,9 +68,6 @@ export class ChatThreadComponent {
 
   /** Emits when a citation is opened. */
   readonly viewed = output<SourceReference>();
-
-  /** Avatar initials used for every assistant turn. */
-  protected readonly assistantInitials = ASSISTANT_INITIALS;
 
   private readonly scroller = viewChild<ElementRef<HTMLElement>>('scroller');
 
