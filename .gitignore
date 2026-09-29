@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+.angular/
+out-tsc/
+tmp/
+
+# Caches
+*.tsbuildinfo
+*.log
+npm-debug.log*
+
+# Test output
+coverage/
+.nyc_output/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Stray duplicate install: an `npm install` that landed one level too deep.
+# Nothing in the app resolves modules from here.
+frontend/frontend/
