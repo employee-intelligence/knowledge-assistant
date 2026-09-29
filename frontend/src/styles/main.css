@@ -50,6 +50,18 @@
   --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/*
+ * One duration for every sidebar movement, so the drawer, the backdrop and the
+ * content offset all travel at the same speed. Slow enough to follow with the
+ * eye, quick enough that the shell still feels like it is answering you.
+ *
+ * Tailwind v4 has no `--duration-*` theme namespace, so this is a utility that
+ * resolves to the same value everywhere it is used.
+ */
+@utility duration-shell {
+  transition-duration: 400ms;
+}
+
 @layer base {
   html {
     -webkit-text-size-adjust: 100%;
