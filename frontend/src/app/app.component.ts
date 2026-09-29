@@ -38,19 +38,26 @@ const FOCUSABLE_SELECTOR =
     </a>
 
     <div class="flex h-dvh overflow-hidden bg-background">
-      @if (layout.isBackdropVisible()) {
-        <button
-          type="button"
-          class="fixed inset-0 z-40 cursor-default bg-foreground/40 backdrop-blur-[1px]"
-          aria-label="Close sidebar"
-          (click)="layout.closeSidebar()"
-        ></button>
-      }
+      <!--
+        The backdrop is always present and faded rather than added and removed:
+        mounting it on open would make the dimming land in a single frame and
+        the whole drawer would read as a jump.
+      -->
+      <button
+        type="button"
+        class="fixed inset-0 z-40 cursor-default bg-foreground/40 backdrop-blur-[1px]
+          transition-opacity duration-shell ease-out-soft motion-reduce:transition-none"
+        [class.opacity-0]="!layout.isBackdropVisible()"
+        [class.pointer-events-none]="!layout.isBackdropVisible()"
+        [inert]="!layout.isBackdropVisible()"
+        aria-label="Close sidebar"
+        (click)="layout.closeSidebar()"
+      ></button>
 
       <aside
         id="app-sidebar"
-        class="fixed inset-y-0 left-0 z-50 flex shrink-0 flex-col shadow-raised
-          transition-[width,transform] duration-300 ease-out-soft
+        class="fixed inset-y-0 left-0 z-50 flex shrink-0 flex-col overflow-hidden shadow-raised
+          transition-[width,translate] duration-shell ease-out-soft
           motion-reduce:transition-none lg:shadow-none"
         [class.w-sidebar]="!layout.isRail()"
         [class.w-rail]="layout.isRail()"
@@ -62,7 +69,7 @@ const FOCUSABLE_SELECTOR =
 
       <main
         id="app-main"
-        class="flex min-h-0 min-w-0 flex-1 flex-col transition-[padding] duration-300
+        class="flex min-h-0 min-w-0 flex-1 flex-col transition-[padding] duration-shell
           ease-out-soft motion-reduce:transition-none lg:pl-rail"
         [class.lg:pl-sidebar]="layout.isSidebarInFlow()"
         [class.lg:pl-rail]="!layout.isSidebarInFlow()"
