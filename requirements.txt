@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+sqlalchemy
+llama-index-core
+llama-index-embeddings-google-genai
+llama-index-llms-google-genai

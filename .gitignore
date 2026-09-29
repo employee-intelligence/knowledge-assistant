@@ -1,6 +1,8 @@
 # Dependencies
 node_modules/
 .pnpm-store/
+.venv/
+__pycache__/
 
 # Build output
 dist/
@@ -12,6 +14,7 @@ tmp/
 *.tsbuildinfo
 *.log
 npm-debug.log*
+.cache_ggshield
 
 # Test output
 coverage/
@@ -27,6 +30,9 @@ coverage/
 .DS_Store
 Thumbs.db
 *.swp
+
+# Database
+history.db
 
 # Stray duplicate install: an `npm install` that landed one level too deep.
 # Nothing in the app resolves modules from here.
