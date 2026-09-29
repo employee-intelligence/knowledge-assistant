@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.angular/
+out-tsc/
+
+# Caches and logs
+*.tsbuildinfo
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Design mockups, kept out of the repository
+public/frontend_UI/
+
+# Editor and OS files
+.idea/
+# The workspace settings are shared so every contributor formats the same way;
+# anything personal under .vscode is not.
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+.DS_Store
+Thumbs.db

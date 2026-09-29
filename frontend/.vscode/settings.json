@@ -1,0 +1,50 @@
+{
+  // Workspace settings for the Angular frontend. Prettier is the single source
+  // of truth for formatting; see .prettierrc.
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+
+  // Angular templates are not TypeScript, so Prettier is pointed at them
+  // explicitly rather than relying on file-type inference.
+  "[typescript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[html]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[angular-html]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+
+  // Tailwind class sorting is deliberately not enabled: the class order in a
+  // template carries meaning (the component's own classes come first).
+  "editor.rulers": [100],
+
+  // The Angular language service needs the compiler to resolve templates.
+  "angular.service.typescriptLanguageService": "enabled",
+
+  // Do not let the built-in TypeScript formatter fight Prettier.
+  "typescript.format.enable": false,
+  "typescript.preferences.importModuleSpecifier": "non-relative",
+  "typescript.preferences.includeInlayParameterNameHints": "none",
+  "typescript.preferences.includeInlayFunctionParameterTypeHints": false,
+  "typescript.preferences.includeInlayVariableTypeHints": false,
+
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+
+  "search.exclude": {
+    "**/dist": true,
+    "**/node_modules": true,
+    "**/.angular": true
+  },
+
+  // The generated `ng new` files are scaffolding, not code to keep open.
+  "files.exclude": {
+    "**/.angular": true
+  }
+}
