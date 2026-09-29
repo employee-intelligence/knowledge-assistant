@@ -5,11 +5,7 @@ import { startWith } from 'rxjs';
 
 import { ButtonComponent } from '../../../../shared/components/button/button.component';
 import { IconComponent } from '../../../../shared/components/icon/icon.component';
-import {
-  GROUNDING_DISCLAIMER,
-  MAX_QUESTION_LENGTH,
-  QUESTION_PLACEHOLDER,
-} from '../../../../shared/utils/constants';
+import { MAX_QUESTION_LENGTH, QUESTION_PLACEHOLDER } from '../../../../shared/utils/constants';
 
 /**
  * The composer. A reactive form owns the text so validation, the character
@@ -62,15 +58,6 @@ import {
           <app-icon name="send-horizontal" [size]="17" />
         </button>
       </div>
-
-      <div class="mt-2 flex items-center justify-between gap-3">
-        <p class="text-xs leading-relaxed text-muted-foreground">{{ disclaimer }}</p>
-        @if (showCounter()) {
-          <span class="shrink-0 text-xs tabular-nums text-muted-foreground" aria-live="polite">
-            {{ value().length }} / {{ maxLength }}
-          </span>
-        }
-      </div>
     </form>
   `,
 })
@@ -80,17 +67,11 @@ export class QuestionInputComponent {
   /** Emits the trimmed question when the form is submitted. */
   readonly ask = output<string>();
 
-  /** Shows the character counter while a long question is being typed. */
-  readonly showCounter = input(false);
-
   /** Disables submission while a request is in flight. */
   readonly isBusy = input(false);
 
   /** Placeholder text, defined once as a product constant. */
   protected readonly placeholder = QUESTION_PLACEHOLDER;
-
-  /** Disclaimer shown under the field. */
-  protected readonly disclaimer = GROUNDING_DISCLAIMER;
 
   /** Maximum accepted question length. */
   protected readonly maxLength = MAX_QUESTION_LENGTH;
