@@ -1,0 +1,98 @@
+@import 'tailwindcss';
+
+/* ---------------------------------------------------------------------------
+   AmaliTech design tokens.
+   Single source of truth for the brand palette: components reference these
+   tokens (bg-primary, text-muted-foreground, ...) and never raw hex values,
+   so a brand change means editing this block only.
+   Values are taken from the approved UI design.
+--------------------------------------------------------------------------- */
+@theme {
+  --color-background: #f6f7f9;
+  --color-foreground: #152029;
+  --color-border: #e1e6ea;
+  --color-input: #ffffff;
+  --color-primary: #0d2839;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f76100;
+  --color-secondary-foreground: #0d2839;
+  /* Pale orange, for tinted surfaces such as citation cards and hover states. */
+  --color-secondary-soft: #fdece1;
+  --color-muted: #edf0f2;
+  --color-muted-foreground: #66757f;
+  --color-card: #ffffff;
+  --color-success: #157347;
+  --color-success-bg: #e3f3e9;
+  --color-warning: #8a6100;
+  --color-warning-bg: #fdf1d7;
+  --color-danger: #b42318;
+  --color-danger-bg: #fdecea;
+  --color-sidebar: #0a1e2b;
+  --color-sidebar-foreground: #e9eef2;
+  --color-sidebar-muted: #93a6b3;
+
+  --font-headings:
+    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+
+  /* Layout dimensions, exposed as utilities so templates stay free of
+     bracket-only arbitrary values (which cannot be used in [class.x] bindings). */
+  --spacing-sidebar: 300px;
+  --spacing-rail: 76px;
+  --spacing-thread: 860px;
+
+  /* Elevation, matching the shadows used in the design. */
+  --shadow-subtle: 0 2px 10px rgb(13 40 57 / 0.05);
+  --shadow-card: 0 2px 12px rgb(13 40 57 / 0.06);
+  --shadow-raised: 0 4px 20px rgb(13 40 57 / 0.1);
+
+  /* Motion */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+
+  /* Keyboard users always get a visible focus ring, mouse users do not. */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-primary;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* Scrollbars are themed to match the dark sidebar and the light content area. */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(147 166 179 / 0.45) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    border-radius: 9999px;
+    background-color: rgb(147 166 179 / 0.45);
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
