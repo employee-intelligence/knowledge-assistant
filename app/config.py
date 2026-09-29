@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     data_dir: str = "data"
     top_k: int = 4
     min_score: float = 0.45
-    database_url: str = "sqlite:///./history.db"
+    database_url: str = "postgresql://user:password@localhost:5432/knowledge_assistant"
     allowed_origins: str = "*"
 
     @property
