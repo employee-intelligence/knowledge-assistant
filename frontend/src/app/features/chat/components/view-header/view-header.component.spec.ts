@@ -19,15 +19,35 @@ describe('ViewHeaderComponent', () => {
   it('should let the breakpoint pick the glyph rather than reading the viewport', async () => {
     const fixture = TestBed.createComponent(TestHostComponent);
     await fixture.whenStable();
-    const icons = (fixture.nativeElement as HTMLElement).querySelectorAll('app-icon');
+    const element = fixture.nativeElement as HTMLElement;
+    const wrappers = element.querySelectorAll('button > span');
 
     // Both glyphs ship and CSS reveals one per breakpoint. Computing the icon
     // from the measured viewport meant phones painted the panel glyph first and
     // swapped it once hydration caught up.
-    expect(icons.length).toBe(2);
-    expect(icons[0].classList).toContain('lg:hidden');
-    expect(icons[1].classList).toContain('hidden');
-    expect(icons[1].classList).toContain('lg:block');
+    expect(wrappers.length).toBe(2);
+    expect(wrappers[0].classList).toContain('lg:hidden');
+    expect(wrappers[0].querySelector('app-icon')).toBeTruthy();
+    expect(wrappers[1].classList).toContain('hidden');
+    expect(wrappers[1].classList).toContain('lg:flex');
+    expect(wrappers[1].querySelector('app-icon')).toBeTruthy();
+
+    // The visibility utility must sit on a wrapper, never on `app-icon`: the
+    // icon sets `inline-flex` on its own host and would win on stylesheet order,
+    // leaving both glyphs drawn.
+    for (const icon of element.querySelectorAll('app-icon')) {
+      expect(icon.classList).not.toContain('hidden');
+      expect(icon.classList).not.toContain('lg:hidden');
+      expect(icon.classList).not.toContain('lg:block');
+    }
+  });
+
+  it('should show the three line menu as the mobile glyph', async () => {
+    const fixture = TestBed.createComponent(TestHostComponent);
+    await fixture.whenStable();
+    const menu = (fixture.nativeElement as HTMLElement).querySelector('app-icon[name="menu"] svg');
+
+    expect(menu?.querySelector('path')?.getAttribute('d')).toBe('M4 6h16M4 12h16M4 18h16');
   });
 
   it('should name the product below lg and show the view title from lg up', async () => {

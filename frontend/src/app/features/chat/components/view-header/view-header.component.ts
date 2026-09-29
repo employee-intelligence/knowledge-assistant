@@ -18,6 +18,13 @@ import { IconComponent } from '../../../../shared/components/icon/icon.component
  * paint. Switching the glyph from a menu to a panel once hydration caught up
  * meant phones briefly showed the wrong icon.
  *
+ * The two glyphs each sit in a wrapper instead of carrying the visibility
+ * utility themselves. `app-icon` sets `inline-flex` on its own host, and two
+ * display utilities of equal weight are settled by stylesheet order, not by the
+ * order they appear in the class attribute, so `hidden` on the host lost and
+ * both icons drew at once. A wrapper with no display utility of its own is
+ * hidden reliably.
+ *
  * It owns no state of its own; the toggle delegates to `LayoutService`.
  */
 @Component({
@@ -26,7 +33,7 @@ import { IconComponent } from '../../../../shared/components/icon/icon.component
   imports: [ButtonComponent, IconComponent],
   host: {
     class:
-      'relative flex shrink-0 items-center justify-between gap-3 border-b border-border bg-card px-4 py-5 sm:px-6 lg:justify-center lg:py-4 lg:px-8',
+      'relative flex shrink-0 items-center justify-between gap-3 border-b border-border bg-card px-4 py-4 sm:px-6 lg:justify-center lg:py-4 lg:px-8',
   },
   template: `
     <span class="truncate font-headings text-base font-semibold text-foreground lg:hidden">
@@ -45,7 +52,7 @@ import { IconComponent } from '../../../../shared/components/icon/icon.component
       app-button
       type="button"
       variant="ghost"
-      tone="strong"
+      tone="brand"
       size="icon"
       class="ml-auto shrink-0 lg:absolute lg:top-1/2 lg:left-6 lg:ml-0 lg:-translate-y-1/2"
       [attr.aria-label]="layout.toggleLabel()"
@@ -53,8 +60,8 @@ import { IconComponent } from '../../../../shared/components/icon/icon.component
       aria-controls="app-sidebar"
       (click)="layout.toggleSidebar()"
     >
-      <app-icon name="menu" [size]="18" class="lg:hidden" />
-      <app-icon name="panel-left" [size]="18" class="hidden lg:block" />
+      <span class="lg:hidden"><app-icon name="menu" [size]="18" /></span>
+      <span class="hidden lg:flex"><app-icon name="panel-left" [size]="18" /></span>
     </button>
   `,
 })
