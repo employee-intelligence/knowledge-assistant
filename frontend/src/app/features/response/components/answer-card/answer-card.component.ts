@@ -1,0 +1,105 @@
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  computed,
+  inject,
+  input,
+  output,
+  signal,
+} from '@angular/core';
+
+import { Message, SourceReference } from '../../../../core/models/message.model';
+import { COPY_FEEDBACK_MS } from '../../../../shared/utils/constants';
+import { ButtonComponent } from '../../../../shared/components/button/button.component';
+import { IconComponent } from '../../../../shared/components/icon/icon.component';
+import { SourceTagComponent } from '../source-tag/source-tag.component';
+
+/** One citation, with a stable key for list tracking. */
+interface Citation extends SourceReference {
+  key: string;
+}
+
+/**
+ * A grounded answer: the answer text and its citations. Copy sits in the top
+ * right corner and stays out of the way until the answer is hovered or the
+ * control itself is focused, so the answer text carries the whole card.
+ */
+@Component({
+  selector: 'app-answer-card',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [ButtonComponent, IconComponent, SourceTagComponent],
+  host: { class: 'group block' },
+  template: `
+    <div
+      class="relative rounded-lg rounded-tl-sm border border-border bg-card px-5 py-4 shadow-card"
+    >
+      <button
+        app-button
+        type="button"
+        variant="ghost"
+        size="xs"
+        class="absolute top-2 right-2 opacity-0 transition-opacity group-hover:opacity-100
+          focus-visible:opacity-100"
+        [style.opacity]="hasCopied() ? 1 : null"
+        (click)="copy()"
+      >
+        <app-icon [name]="hasCopied() ? 'check' : 'copy'" [size]="12" />
+        {{ hasCopied() ? 'Copied' : 'Copy' }}
+      </button>
+
+      <p class="pr-16 text-sm leading-relaxed text-foreground">{{ message().text }}</p>
+
+      @if (citations().length > 0) {
+        <div class="mt-3 flex flex-col gap-2">
+          @for (citation of citations(); track citation.key) {
+            <app-source-tag [source]="citation" (viewed)="viewed.emit($event)" />
+          }
+        </div>
+      }
+    </div>
+  `,
+})
+export class AnswerCardComponent {
+  private readonly destroyRef = inject(DestroyRef);
+
+  /** The answer turn to render. */
+  readonly message = input.required<Message>();
+
+  /** Emits when a citation is opened. */
+  readonly viewed = output<SourceReference>();
+
+  /** True for a moment after the answer text is copied. */
+  protected readonly hasCopied = signal(false);
+
+  /** The answer's citations, each with a stable list key. */
+  protected readonly citations = computed<Citation[]>(() =>
+    this.message().sources.map((source) => ({
+      ...source,
+      key: `${source.document}-${source.section}-${source.page}`,
+    })),
+  );
+
+  private copyTimer: ReturnType<typeof setTimeout> | undefined;
+
+  constructor() {
+    this.destroyRef.onDestroy(() => clearTimeout(this.copyTimer));
+  }
+
+  /** Copies the answer text. Stays silent if clipboard access is denied. */
+  protected async copy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(this.message().text);
+      this.flagCopied();
+    } catch {
+      // Clipboard access can be denied; the answer is still selectable.
+    }
+  }
+
+  /** Briefly shows the copied state, then restores the label. */
+  private flagCopied(): void {
+    this.hasCopied.set(true);
+    clearTimeout(this.copyTimer);
+    this.copyTimer = setTimeout(() => this.hasCopied.set(false), COPY_FEEDBACK_MS);
+  }
+}
