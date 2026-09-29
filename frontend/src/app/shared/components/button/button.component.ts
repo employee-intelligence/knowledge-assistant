@@ -7,7 +7,7 @@ export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'sub
 export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg' | 'icon' | 'rail';
 
 /** Surface the button sits on, which decides its resting and hover colour. */
-export type ButtonTone = 'light' | 'dark';
+export type ButtonTone = 'light' | 'brand' | 'dark';
 
 /**
  * Utility classes per variant. `ghost` and `outline` carry no text colour: the
@@ -25,6 +25,9 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
 /** Text and hover colour for the variants that have no fill of their own. */
 const TONE_CLASSES: Record<ButtonTone, string> = {
   light: 'text-muted-foreground hover:bg-muted hover:text-foreground',
+  // For a control that is the only way in or out of a panel: it carries the
+  // brand colour at rest rather than fading into the surface it sits on.
+  brand: 'text-primary hover:bg-muted hover:text-primary',
   dark: 'text-sidebar-muted hover:bg-white/10 hover:text-sidebar-foreground',
 };
 

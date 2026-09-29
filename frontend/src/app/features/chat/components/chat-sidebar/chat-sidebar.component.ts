@@ -32,7 +32,7 @@ import { BrandLogoComponent } from '../brand-logo/brand-logo.component';
   host: { class: 'flex h-full flex-col overflow-hidden bg-sidebar' },
   template: `
     @if (layout.isRail()) {
-      <!-- Collapsed rail: the design's tablet layout, also used on desktop. -->
+      <!-- Collapsed rail: the mark is the only identity left, so it stays. -->
       <div class="flex h-full flex-col items-center gap-4 py-5">
         <app-brand-logo [showWordmark]="false" />
 
@@ -83,11 +83,9 @@ import { BrandLogoComponent } from '../brand-logo/brand-logo.component';
         </a>
       </div>
     } @else {
-      <div class="px-5 pt-5 pb-4">
-        <app-brand-logo />
-      </div>
-
-      <div class="px-4">
+      <!-- The expanded column carries no mark: the view header names the
+           product instead, so the two never compete for the same corner. -->
+      <div class="px-4 pt-5">
         <button app-button type="button" size="lg" [fullWidth]="true" (click)="onNewConversation()">
           <app-icon name="plus" [size]="16" />
           <span>New Conversation</span>

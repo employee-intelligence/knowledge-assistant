@@ -28,7 +28,7 @@ describe('LayoutService', () => {
     it('shows the sidebar as a column and offsets the content', () => {
       expect(layout.isDesktop()).toBe(true);
       expect(layout.mode()).toBe('expanded');
-      expect(layout.isSidebarInFlow()).toBe(true);
+      expect(layout.isRail()).toBe(false);
       expect(layout.isBackdropVisible()).toBe(false);
     });
 
@@ -37,7 +37,7 @@ describe('LayoutService', () => {
       TestBed.tick();
 
       expect(layout.mode()).toBe('rail');
-      expect(layout.isSidebarInFlow()).toBe(false);
+      expect(layout.isRail()).toBe(true);
       expect(localStorage.getItem(SIDEBAR_PREFERENCE_KEY)).toBe('true');
 
       layout.toggleSidebar();
@@ -75,7 +75,7 @@ describe('LayoutService', () => {
       expect(layout.isDesktop()).toBe(false);
       expect(layout.mode()).toBe('hidden');
       expect(layout.isSidebarVisible()).toBe(false);
-      expect(layout.isSidebarInFlow()).toBe(false);
+      expect(layout.isRail()).toBe(false);
       expect(layout.toggleLabel()).toBe('Open menu');
     });
 
@@ -109,7 +109,7 @@ describe('LayoutService', () => {
 
       expect(layout.mode()).toBe('expanded');
       expect(layout.isBackdropVisible()).toBe(true);
-      expect(layout.isSidebarInFlow()).toBe(false);
+      expect(layout.isRail()).toBe(false);
 
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       TestBed.tick();
