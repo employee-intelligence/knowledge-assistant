@@ -58,7 +58,7 @@ const FOCUSABLE_SELECTOR =
         id="app-sidebar"
         class="fixed inset-y-0 left-0 z-50 flex shrink-0 flex-col overflow-hidden shadow-raised
           transition-[width,translate] duration-shell ease-out-soft
-          motion-reduce:transition-none lg:shadow-none"
+          motion-reduce:transition-none lg:translate-x-0 lg:shadow-none"
         [class.w-sidebar]="!layout.isRail()"
         [class.w-rail]="layout.isRail()"
         [class.-translate-x-full]="layout.mode() === 'hidden'"
@@ -71,8 +71,8 @@ const FOCUSABLE_SELECTOR =
         id="app-main"
         class="flex min-h-0 min-w-0 flex-1 flex-col transition-[padding] duration-shell
           ease-out-soft motion-reduce:transition-none lg:pl-rail"
-        [class.lg:pl-sidebar]="layout.isSidebarInFlow()"
-        [class.lg:pl-rail]="!layout.isSidebarInFlow()"
+        [class.lg:pl-sidebar]="!layout.isRail()"
+        [class.lg:pl-rail]="layout.isRail()"
       >
         <router-outlet />
       </main>

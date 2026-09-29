@@ -67,9 +67,25 @@ describe('AppComponent', () => {
     expect(main?.className).toContain('transition-[padding]');
     expect(backdrop?.className).toContain('transition-opacity');
 
+    // The shell assumes the compact layout before it can measure anything, so
+    // the drawer renders off canvas. `lg:translate-x-0` is what puts it back for
+    // a wide screen without waiting for hydration.
+    expect(sidebar?.className).toContain('lg:translate-x-0');
+
     // One shared duration, so nothing overtakes anything else.
     for (const node of [sidebar, main, backdrop]) {
       expect(node?.className).toContain('duration-shell');
     }
+  });
+
+  it('should reserve the full column for the content offset, not just when expanded', async () => {
+    const fixture = TestBed.createComponent(AppComponent);
+    await fixture.whenStable();
+    const main = (fixture.nativeElement as HTMLElement).querySelector('#app-main');
+
+    // Gating this on "is the viewport desktop" made the offset wrong on the
+    // first paint, because the server cannot know the viewport.
+    expect(main?.classList).toContain('lg:pl-sidebar');
+    expect(main?.classList).not.toContain('lg:pl-rail');
   });
 });

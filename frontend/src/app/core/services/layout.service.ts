@@ -9,7 +9,11 @@ import {
 } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
 
-import { DESKTOP_BREAKPOINT, SIDEBAR_PREFERENCE_KEY } from '../../shared/utils/constants';
+import {
+  INITIAL_VIEWPORT_WIDTH,
+  DESKTOP_BREAKPOINT,
+  SIDEBAR_PREFERENCE_KEY,
+} from '../../shared/utils/constants';
 
 /** How the sidebar is currently presented at the active breakpoint. */
 export type SidebarMode = 'expanded' | 'rail' | 'hidden';
@@ -23,13 +27,18 @@ export type SidebarMode = 'expanded' | 'rail' | 'hidden';
  * Breakpoints:
  * - below `lg` the sidebar is a drawer, hidden until the hamburger opens it
  * - `lg` and up  it is a permanent column, collapsible to the icon rail
+ *
+ * Nothing that depends on the viewport is decided by the width alone: the shell
+ * and the header let the `lg` media query place everything on the first paint,
+ * and this service only carries the choices a media query cannot hold, namely
+ * whether the drawer is open and whether the column is collapsed.
  */
 @Injectable({ providedIn: 'root' })
 export class LayoutService {
   private readonly destroyRef = inject(DestroyRef);
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
 
-  private readonly viewportWidthState = signal(DESKTOP_BREAKPOINT);
+  private readonly viewportWidthState = signal(INITIAL_VIEWPORT_WIDTH);
   private readonly collapsedState = signal(false);
   private readonly drawerOpenState = signal(false);
 
@@ -62,9 +71,6 @@ export class LayoutService {
 
   /** True when only the icon rail is shown. */
   readonly isRail = computed(() => this.mode() === 'rail');
-
-  /** True when the sidebar should occupy a column beside the content. */
-  readonly isSidebarInFlow = computed(() => this.mode() === 'expanded' && this.isDesktop());
 
   /**
    * Toggles the sidebar: the overlay drawer on small screens, the column on
@@ -114,8 +120,10 @@ export class LayoutService {
   });
 
   constructor() {
-    // The viewport only exists in the browser; server rendering keeps the
-    // default width so the markup is stable for hydration.
+    // The viewport only exists in the browser. Until it does, the shell renders
+    // the compact drawer layout, which the `lg` media query promotes to the
+    // column layout, so the first paint is right on both without waiting for
+    // hydration to correct it.
     if (!this.isBrowser) {
       return;
     }

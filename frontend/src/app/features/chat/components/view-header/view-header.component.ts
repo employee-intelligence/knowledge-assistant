@@ -1,8 +1,8 @@
-import { ChangeDetectionStrategy, Component, computed, inject, input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, input } from '@angular/core';
 
 import { LayoutService } from '../../../../core/services/layout.service';
 import { ButtonComponent } from '../../../../shared/components/button/button.component';
-import { IconComponent, type IconName } from '../../../../shared/components/icon/icon.component';
+import { IconComponent } from '../../../../shared/components/icon/icon.component';
 
 /**
  * The header strip every view sits under: the sidebar toggle and the view
@@ -12,6 +12,11 @@ import { IconComponent, type IconName } from '../../../../shared/components/icon
  * the product name. The header stands in for it there, with the toggle on the
  * trailing edge; from `lg` up the sidebar is on screen, so the header goes
  * back to a centred title with the toggle on the leading edge.
+ *
+ * Every one of those choices is made by a `lg` variant rather than by reading
+ * the viewport in TypeScript, so the header is already correct on the first
+ * paint. Switching the glyph from a menu to a panel once hydration caught up
+ * meant phones briefly showed the wrong icon.
  *
  * It owns no state of its own; the toggle delegates to `LayoutService`.
  */
@@ -40,6 +45,7 @@ import { IconComponent, type IconName } from '../../../../shared/components/icon
       app-button
       type="button"
       variant="ghost"
+      tone="strong"
       size="icon"
       class="ml-auto shrink-0 lg:absolute lg:top-1/2 lg:left-6 lg:ml-0 lg:-translate-y-1/2"
       [attr.aria-label]="layout.toggleLabel()"
@@ -47,7 +53,8 @@ import { IconComponent, type IconName } from '../../../../shared/components/icon
       aria-controls="app-sidebar"
       (click)="layout.toggleSidebar()"
     >
-      <app-icon [name]="toggleIcon()" [size]="18" />
+      <app-icon name="menu" [size]="18" class="lg:hidden" />
+      <app-icon name="panel-left" [size]="18" class="hidden lg:block" />
     </button>
   `,
 })
@@ -57,12 +64,4 @@ export class ViewHeaderComponent {
 
   /** Primary heading of the view. */
   readonly title = input('');
-
-  /**
-   * Below `lg` the sidebar is a drawer, so the control is a hamburger; on wide
-   * screens it toggles the column and reads as a panel.
-   */
-  protected readonly toggleIcon = computed<IconName>(() =>
-    this.layout.isCompact() ? 'menu' : 'panel-left',
-  );
 }
