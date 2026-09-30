@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     min_score: float = 0.45
     database_url: str = "postgresql://user:password@localhost:5432/knowledge_assistant"
     allowed_origins: str = "*"
+    jwt_secret_key: str = "change-me-in-production"
 
     @property
     def origins_list(self) -> list[str]:
