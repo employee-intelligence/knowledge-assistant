@@ -17,13 +17,6 @@ export const API_BASE_URL = 'https://knowledge-assistant-backend-88gw.onrender.c
 export const API_TIMEOUT_MS = 90_000;
 
 /**
- * The backend sends `expires_at` without a timezone designator, so it is stored
- * alongside the id and a session is retired this long before the server drops it,
- * rather than at the exact moment a request starts failing.
- */
-export const SESSION_EXPIRY_MARGIN_MS = 30_000;
-
-/**
  * Where the session id is kept across a reload.
  *
  * `sessionStorage` rather than `localStorage` on purpose: the backend scopes

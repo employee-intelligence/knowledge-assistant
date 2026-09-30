@@ -2,9 +2,10 @@ import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 
-import { API_BASE_URL } from '../api.config';
+import { API_BASE_URL, SESSION_STORAGE_KEY } from '../api.config';
 import { ChatService } from './chat.service';
 import { HistoryService } from './history.service';
+import { SessionService } from './session.service';
 
 /** A citation as the backend sends one. */
 const SOURCE = {
@@ -17,6 +18,7 @@ const SOURCE = {
 describe('ChatService', () => {
   let chat: ChatService;
   let history: HistoryService;
+  let session: SessionService;
   let http: HttpTestingController;
 
   /**
@@ -33,6 +35,7 @@ describe('ChatService', () => {
   const injectService = (): HttpTestingController => {
     chat = TestBed.inject(ChatService);
     history = TestBed.inject(HistoryService);
+    session = TestBed.inject(SessionService);
     http = TestBed.inject(HttpTestingController);
 
     return http;
@@ -145,13 +148,93 @@ describe('ChatService', () => {
 
     it('nudges toward rephrasing when the backend rejected the question itself', () => {
       chat.ask('Hi');
-      http.expectOne(`${API_BASE_URL}/chat`).flush(
-        { detail: [{ loc: ['body', 'question'], msg: 'too short', type: 'string_too_short' }] },
-        { status: 422, statusText: 'Unprocessable Entity' },
-      );
+      http
+        .expectOne(`${API_BASE_URL}/chat`)
+        .flush(
+          { detail: [{ loc: ['body', 'question'], msg: 'too short', type: 'string_too_short' }] },
+          { status: 422, statusText: 'Unprocessable Entity' },
+        );
 
       expect(chat.messages()[1].status).toBe('failed');
       expect(chat.messages()[1].text).toContain('Try rephrasing your question');
+    });
+  });
+
+  describe('a session that has expired', () => {
+    beforeEach(givenSettledSession);
+
+    /**
+     * The backend answers a question it will not accept with a 200 rather than a
+     * status the client can branch on, so this is the only signal it gets.
+     */
+    const SESSION_GONE = {
+      answer: 'Session expired or invalid. Please create a new session.',
+      answered: false,
+      sources: [],
+    };
+
+    it('reports the expiry instead of showing the question as unanswerable', () => {
+      chat.ask('How much leave?');
+      answerTheQuestion(SESSION_GONE);
+
+      // Told the session is gone, which is what happened. Reading this as a gap in
+      // the documents would have claimed the question was never answerable.
+      expect(chat.sessionExpired()).toBe(true);
+      expect(chat.isEmpty()).toBe(true);
+    });
+
+    it('does not file the unasked question as a failed turn', () => {
+      chat.ask('How much leave?');
+      answerTheQuestion(SESSION_GONE);
+
+      // Every turn in the thread was filed under the dead id, so the view shows
+      // the expiry rather than a card the user could only retry into the same
+      // closed session.
+      expect(chat.messages()).toEqual([]);
+      expect(chat.isLoading()).toBe(false);
+    });
+
+    it('retires the dead id so a new conversation opens a fresh session', () => {
+      chat.ask('How much leave?');
+      answerTheQuestion(SESSION_GONE);
+
+      expect(session.sessionId()).toBeNull();
+      expect(sessionStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
+
+      chat.startNewConversation();
+      chat.ask('A new question?');
+
+      http.expectOne(`${API_BASE_URL}/sessions`).flush({
+        session_id: 'sess-5678',
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+      const asked = http.expectOne(`${API_BASE_URL}/chat`);
+
+      expect(asked.request.body).toEqual({ session_id: 'sess-5678', question: 'A new question?' });
+      asked.flush({ answer: 'A new answer.', answered: true, sources: [] });
+    });
+
+    it('reports the expiry when the backend rejects the session with a status', () => {
+      chat.ask('How much leave?');
+      http
+        .expectOne(`${API_BASE_URL}/chat`)
+        .flush('Unauthorized', { status: 401, statusText: 'Unauthorized' });
+
+      expect(chat.sessionExpired()).toBe(true);
+      expect(chat.messages()).toEqual([]);
+    });
+
+    it('keeps a genuine gap in the documents out of the expiry path', () => {
+      chat.ask('What is the office plant policy?');
+      answerTheQuestion({ answer: 'No mention of that.', answered: false, sources: [] });
+
+      // The same `answered: false` the backend uses for a dead session, but a real
+      // answer about the corpus. Retiring the session here would discard a
+      // conversation the user is still in the middle of.
+      expect(chat.sessionExpired()).toBe(false);
+      expect(chat.messages()[1].status).toBe('not-found');
+      expect(session.sessionId()).toBe('sess-1234');
     });
   });
 
@@ -172,14 +255,27 @@ describe('ChatService', () => {
       expect(chat.threadTitle()).toBe('Second?');
     });
 
+    it('asks every question in the conversation under one session', () => {
+      // The whole conversation shares a session. A fresh one per question would
+      // file each turn under its own id, so `/history` would only ever hold the
+      // last question asked and the sidebar would empty itself after every ask.
+      http.expectNone(`${API_BASE_URL}/sessions`);
+
+      chat.ask('Third?');
+      const request = http.expectOne(`${API_BASE_URL}/chat`);
+
+      expect(request.request.body).toEqual({ session_id: 'sess-1234', question: 'Third?' });
+      request.flush({ answer: 'Third answer.', answered: true, sources: [] });
+      http.expectNone(`${API_BASE_URL}/sessions`);
+
+      expect(session.sessionId()).toBe('sess-1234');
+    });
+
     it('shows the conversation that led to an older turn, not a bare answer', () => {
       chat.openTurn('0');
 
       expect(chat.threadTitle()).toBe('First?');
-      expect(chat.messages().map((message) => message.text)).toEqual([
-        'First?',
-        'First answer.',
-      ]);
+      expect(chat.messages().map((message) => message.text)).toEqual(['First?', 'First answer.']);
     });
 
     it('has nothing to show for an id that is not one of this session turns', () => {
@@ -191,9 +287,48 @@ describe('ChatService', () => {
 
     it('returns to following the newest turn', () => {
       chat.openTurn('0');
-      chat.startNewConversation();
+      chat.stopFollowing();
 
       expect(chat.activeTurnId()).toBe('1');
+    });
+
+    it('starts an empty conversation, retiring the session with the turns', () => {
+      // A new conversation is not the same session pointed back at its first
+      // turn. The backend scopes history by session, so keeping it would list the
+      // old conversation's questions in a thread meant to be empty.
+      expect(session.sessionExpired()).toBe(false);
+
+      chat.startNewConversation();
+
+      expect(chat.messages()).toEqual([]);
+      expect(chat.hasMessages()).toBe(false);
+      expect(chat.isEmpty()).toBe(true);
+      // The stored id is gone, so the next question opens a fresh session.
+      expect(session.sessionId()).toBeNull();
+    });
+
+    it('opens a new session for the first question after a new conversation', () => {
+      // The whole point of retiring the session: the next question must not be
+      // filed beside the conversation the user just walked away from.
+      chat.startNewConversation();
+      chat.ask('A new question?');
+
+      const created = http.expectOne(`${API_BASE_URL}/sessions`);
+
+      created.flush({
+        session_id: 'sess-5678',
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+      const asked = http.expectOne(`${API_BASE_URL}/chat`);
+
+      expect(asked.request.body).toEqual({ session_id: 'sess-5678', question: 'A new question?' });
+      asked.flush({ answer: 'A new answer.', answered: true, sources: [] });
+
+      expect(chat.messages().map((message) => message.text)).toEqual([
+        'A new question?',
+        'A new answer.',
+      ]);
     });
   });
 
@@ -212,7 +347,10 @@ describe('ChatService', () => {
 
       const request = http.expectOne(`${API_BASE_URL}/chat`);
 
-      expect(request.request.body).toEqual({ session_id: 'sess-1234', question: 'How much leave?' });
+      expect(request.request.body).toEqual({
+        session_id: 'sess-1234',
+        question: 'How much leave?',
+      });
       request.flush({ answer: 'Twenty days.', answered: true, sources: [] });
     });
 
@@ -254,17 +392,15 @@ describe('ChatService', () => {
       session_id: 'sess-1234',
       expires_at: new Date(Date.now() + 3_600_000).toISOString(),
     });
-    http
-      .expectOne(`${API_BASE_URL}/history/sess-1234`)
-      .flush([
-        {
-          question: 'Older question',
-          answer: 'Older answer.',
-          answered: true,
-          sources: [],
-          created_at: '2026-09-30T08:00:00Z',
-        },
-      ]);
+    http.expectOne(`${API_BASE_URL}/history/sess-1234`).flush([
+      {
+        question: 'Older question',
+        answer: 'Older answer.',
+        answered: true,
+        sources: [],
+        created_at: '2026-09-30T08:00:00Z',
+      },
+    ]);
 
     http.expectOne(`${API_BASE_URL}/chat`).flush({ answer: 'Yes.', answered: true, sources: [] });
 

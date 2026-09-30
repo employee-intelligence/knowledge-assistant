@@ -23,15 +23,50 @@ export class ApiError extends Error {
     readonly status: number,
     /** True when retrying the same request could plausibly succeed. */
     readonly isTransient: boolean,
+    /**
+     * True when the backend no longer accepts the session the request was made
+     * under, so the conversation it belonged to is gone rather than unfinished.
+     */
+    readonly isSessionLost: boolean = false,
   ) {
     super(message);
     this.name = 'ApiError';
   }
 }
 
+/**
+ * The wording the backend answers with when it will not accept the session a
+ * question was posted under.
+ *
+ * `/chat` reports a session it no longer recognises as an ordinary 200 with
+ * `answered: false`, which by status alone is indistinguishable from a genuine
+ * gap in the corpus. Reading that as a gap is the more damaging of the two
+ * mistakes: it tells the user their question was unanswerable when it was never
+ * asked, and it leaves the conversation accumulating turns against a session that
+ * is already closed, so the follow-up questions that would have made sense are
+ * posted into a session that is gone. Recognising it here keeps the decision in
+ * one place, next to the endpoint that speaks it.
+ */
+const SESSION_LOST_ANSWER = 'session expired or invalid';
+
+/** The message shown for a request the backend has no session for. */
+const SESSION_LOST_MESSAGE = 'Your session has expired. Start a new conversation to ask again.';
+
 /** The status an answer outcome maps to. `answered: false` is a genuine gap. */
 function statusFor(answered: boolean): AnswerStatus {
   return answered ? 'answered' : 'not-found';
+}
+
+/**
+ * True when an answer is the backend declining to answer because the session is
+ * gone, rather than an answer about the corpus.
+ *
+ * Only consulted for an `answered: false` response. An answer that happens to
+ * mention expiry while actually answering the question is an answer, and is left
+ * alone.
+ */
+function isSessionLost(answer: string): boolean {
+  return answer.toLowerCase().includes(SESSION_LOST_ANSWER);
 }
 
 /**
@@ -69,7 +104,16 @@ export class ApiService {
   /** `GET /history/{session_id}`. Every answered turn in the session, oldest first. */
   getHistory(sessionId: string): Observable<Turn[]> {
     return this.get<HistoryItemDto[]>(`/history/${encodeURIComponent(sessionId)}`).pipe(
-      map((items) => items.map((item, index) => this.toTurn(item, index))),
+      // The backend returns a session newest first, which is the right order for a
+      // list the user reads top down but the wrong one for a conversation. Every
+      // consumer here assumes oldest first: a turn's id is its position in that
+      // order, a thread is a slice up to the open turn, and the newest turn is the
+      // last one. Reversing here keeps that single assumption true instead of
+      // scattering corrections across the services that read this.
+      //
+      // The array is reversed before ids are assigned, so id 0 is still the oldest
+      // turn and the newest is last, matching a turn appended locally.
+      map((items) => [...items].reverse().map((item, index) => this.toTurn(item, index))),
     );
   }
 
@@ -108,8 +152,22 @@ export class ApiService {
     };
   }
 
-  /** A chat response as the domain model the services work with. */
+  /**
+   * A chat response as the domain model the services work with.
+   *
+   * A response the backend refused to answer because the session is gone is
+   * raised as an error rather than returned as an answer. It reaches this method
+   * as a success, so without the check it would be filed on the turn as a "not
+   * found in the documents" card and the user would be told their question had no
+   * answer, when the question was never asked. Raising it puts it on the same
+   * path as any other failure, which is where the services already know to report
+   * an expired session and offer a new conversation.
+   */
   private toAnswer(response: ChatResponse): AnswerResponse {
+    if (!response.answered && isSessionLost(response.answer)) {
+      throw new ApiError(SESSION_LOST_MESSAGE, 0, false, true);
+    }
+
     return {
       text: response.answer,
       status: statusFor(response.answered),
@@ -147,6 +205,11 @@ export class ApiService {
    * A 422 means the question itself was rejected, so the backend's own wording is
    * passed through; a 5xx means the answer may still be there and is worth
    * retrying.
+   *
+   * A rejection of the session itself is kept apart from both, because retrying
+   * it is pointless and telling the user to rephrase would be wrong: the id they
+   * are posting under is dead. Those statuses are marked as a lost session so the
+   * caller reports an expiry rather than a failed question.
    */
   private toApiError(error: unknown): ApiError {
     if (error instanceof HttpErrorResponse) {
@@ -165,11 +228,18 @@ export class ApiService {
       }
 
       if (error.status >= 500) {
-        return new ApiError('The assistant is temporarily unavailable. Please try again.', error.status, true);
+        return new ApiError(
+          'The assistant is temporarily unavailable. Please try again.',
+          error.status,
+          true,
+        );
       }
 
-      if (error.status === 404) {
-        return new ApiError('This conversation is no longer available.', 404, false);
+      // 401 and 403 are how an endpoint says the session is not usable; 404 is how
+      // one says the session itself is no longer there. All three mean the same
+      // thing here, and none of them are worth a retry.
+      if (error.status === 401 || error.status === 403 || error.status === 404) {
+        return new ApiError(SESSION_LOST_MESSAGE, error.status, false, true);
       }
 
       return new ApiError('The request could not be completed.', error.status, false);

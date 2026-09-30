@@ -85,9 +85,11 @@ describe('HistoryService', () => {
     expect(history.hasHistory()).toBe(false);
 
     openSession();
+    // Newest first, as the endpoint returns, so the reversal in the API service is
+    // what puts the conversation in the order a thread is read in.
     http.expectOne(`${API_BASE_URL}/history/${SESSION_ID}`).flush([
-      historyItem('How much leave?', 'Twenty days.', '2026-09-30T08:00:00Z'),
       historyItem('And carryover?', 'Five days.', '2026-09-30T09:00:00Z'),
+      historyItem('How much leave?', 'Twenty days.', '2026-09-30T08:00:00Z'),
     ]);
 
     expect(history.hasHistory()).toBe(true);

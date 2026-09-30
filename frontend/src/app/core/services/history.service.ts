@@ -128,17 +128,23 @@ export class HistoryService {
     // Skipped on the server. Turns belong to a browser session and a server
     // render would otherwise pay the round trip on every request to paint a
     // conversation the client is about to fetch anyway.
-    //
-    // Loaded is still marked, because on the server "resolved" and "empty" are
-    // the same thing: there is no request to wait for. Leaving it unresolved
-    // would render the response route's spinner into the served HTML for a turn
-    // that is never going to arrive.
     if (this.isBrowser) {
       this.load();
       return;
     }
 
-    this.loadedState.set(true);
+    // Loaded stays false here on purpose. `ChatService.isResolving` is the negation
+    // of it, and the response view reads that as "still loading" before it reads
+    // the turns themselves. Marking this loaded on the server therefore produced
+    // `hasMessages() === false` with nothing pending, which the view rendered as
+    // "Question not found" and shipped inside the served HTML. A refresh showed
+    // that message for as long as the browser took to fetch the real history, so
+    // the app told the user their question was missing right before displaying it.
+    //
+    // Leaving it unresolved renders the loading card instead, which is both true
+    // of the server's own knowledge and correct for the client, which is about to
+    // resolve it. Settling still happens, so anything queueing on `ready()` is
+    // released rather than waiting for a fetch that will never run here.
     this.markSettled();
   }
 
@@ -166,7 +172,7 @@ export class HistoryService {
           // with it. Leaving them on screen would show a conversation against a
           // session the backend knows nothing about, and every follow-up
           // question would be posted into a session that is already closed.
-          const isLost = error instanceof ApiError && error.status === 404;
+          const isLost = error instanceof ApiError && error.isSessionLost;
 
           if (isLost) {
             this.session.handleSessionLoss(error);
