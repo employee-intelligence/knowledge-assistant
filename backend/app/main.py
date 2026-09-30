@@ -1,8 +1,10 @@
+import logging
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,11 +24,17 @@ from app.schemas import (
     UserResponse,
 )
 
+logger = logging.getLogger(__name__)
+
 state: dict = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not settings.has_google_api_key:
+        # Not fatal: the guard and retrieval-only paths still work, and health
+        # reports the degraded state so it is visible before a user hits it.
+        logger.error("GOOGLE_API_KEY is unset; /chat will fail to answer questions")
     init_db()
     index = build_index()  # rebuilt on every start; takes seconds
     state["assistant"] = Assistant(index)
@@ -46,6 +54,21 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Log the real cause and return JSON.
+
+    Without this, any unhandled error reaches the browser as a bare text/plain
+    500 carrying no explanation, which is what made the original Gemini outage
+    so hard to diagnose from the outside.
+    """
+    logger.exception("unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+    )
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -56,7 +79,14 @@ def get_db():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "index_ready": "assistant" in state}
+    index_ready = "assistant" in state
+    llm_configured = settings.has_google_api_key
+    return {
+        "status": "ok" if index_ready and llm_configured else "degraded",
+        "index_ready": index_ready,
+        "llm_configured": llm_configured,
+        "llm_model": settings.llm_model,
+    }
 
 
 @app.get("/documents")
