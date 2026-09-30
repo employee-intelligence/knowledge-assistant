@@ -1,3 +1,5 @@
+import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 
@@ -7,7 +9,11 @@ describe('AppComponent', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [AppComponent],
-      providers: [provideRouter([])],
+      // The shell renders the sidebar, which reaches the conversation services,
+      // which reach `HttpClient`. Without a backend behind it the sidebar fails
+      // to construct and these assertions fail intermittently depending on when
+      // the injection error surfaces.
+      providers: [provideRouter([]), provideHttpClient(), provideHttpClientTesting()],
     }).compileComponents();
   });
 

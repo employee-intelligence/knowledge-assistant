@@ -89,6 +89,107 @@
 }
 
 @layer components {
+  /*
+   * Answer typography.
+   *
+   * The answer body is bound with [innerHTML], so Tailwind cannot see these
+   * elements at build time and no utility class applies to them. The rules live
+   * here instead, keyed off the wrapper, and are scoped tightly enough that they
+   * cannot reach anything else in the app.
+   */
+  .answer-prose > * + * {
+    margin-top: 0.625rem;
+  }
+
+  .answer-prose ul,
+  .answer-prose ol {
+    padding-left: 1.15rem;
+  }
+
+  .answer-prose ul {
+    list-style: disc;
+  }
+
+  .answer-prose ol {
+    list-style: decimal;
+  }
+
+  .answer-prose li + li {
+    margin-top: 0.25rem;
+  }
+
+  .answer-prose li::marker {
+    color: var(--color-muted-foreground);
+  }
+
+  .answer-prose strong {
+    font-weight: 600;
+    color: var(--color-foreground);
+  }
+
+  .answer-prose h2,
+  .answer-prose h3,
+  .answer-prose h4 {
+    font-family: var(--font-headings);
+    font-weight: 600;
+    color: var(--color-foreground);
+  }
+
+  .answer-prose h2 {
+    font-size: 0.95rem;
+  }
+
+  .answer-prose h3,
+  .answer-prose h4 {
+    font-size: 0.875rem;
+  }
+
+  .answer-prose code {
+    border-radius: 0.25rem;
+    background-color: var(--color-muted);
+    padding: 0.1rem 0.3rem;
+    font-size: 0.8em;
+  }
+
+  /*
+   * Tables are cited policy comparisons, so they get a real grid. Long cells
+   * wrap rather than pushing the card wider than the thread.
+   */
+  .answer-prose table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+  }
+
+  .answer-prose th,
+  .answer-prose td {
+    border: 1px solid var(--color-border);
+    padding: 0.35rem 0.5rem;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  .answer-prose th {
+    background-color: var(--color-muted);
+    font-weight: 600;
+  }
+
+  /*
+   * Citations carry the same inline formatting as an answer, at a size that
+   * reads as supporting evidence rather than as a second answer.
+   */
+  .citation-prose strong {
+    font-weight: 600;
+    color: var(--color-foreground);
+  }
+
+  .citation-prose code {
+    border-radius: 0.2rem;
+    background-color: var(--color-muted);
+    padding: 0 0.2rem;
+    font-size: 0.95em;
+  }
+
   /* Scrollbars are themed to match the dark sidebar and the light content area. */
   .scrollbar-thin {
     scrollbar-width: thin;
