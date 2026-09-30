@@ -1,8 +1,0 @@
-fastapi
-uvicorn[standard]
-pydantic-settings
-sqlalchemy
-psycopg2-binary
-llama-index-core
-llama-index-embeddings-google-genai
-llama-index-llms-google-genai
