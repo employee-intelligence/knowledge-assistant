@@ -1,105 +1,95 @@
 import { DestroyRef, Injectable, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { Observable, catchError, finalize, map, of, switchMap } from 'rxjs';
 
-import { MOCK_SUGGESTIONS } from '../data/mock-chat.data';
-import { ChatSession } from '../models/chat-session.model';
-import { AnswerResponse, Message, SourceReference } from '../models/message.model';
-import { Question } from '../models/question.model';
-import { formatDocumentDate } from '../../shared/utils/format-date.util';
-import { ApiService } from './api.service';
+import { Message } from '../models/message.model';
+import { Turn } from '../models/turn.model';
+import { ApiError, ApiService } from './api.service';
 import { HistoryService } from './history.service';
+import { SessionService } from './session.service';
 
 /**
- * Owns the open conversation: its question, its turns, and the loading state
- * while an answer is being retrieved. The dashboard, the response view and the
- * sidebar all read from here rather than keeping their own copies.
+ * Owns the open conversation: which turn the response view is showing, the turns
+ * that lead up to it, and the request in flight while an answer is retrieved.
+ *
+ * It keeps no copy of the conversation. The turns live in `HistoryService`,
+ * which is backed by the backend's own history for the session, so the thread,
+ * the sidebar and the history view cannot drift apart. What this service adds is
+ * that list read for one turn: which question is open, which messages make up
+ * its thread, and where an answer currently stands.
  */
 @Injectable({ providedIn: 'root' })
 export class ChatService {
   private readonly api = inject(ApiService);
   private readonly history = inject(HistoryService);
+  private readonly session = inject(SessionService);
   private readonly destroyRef = inject(DestroyRef);
 
-  private readonly sessionState = signal<ChatSession | null>(null);
-  private readonly loadingState = signal(false);
-  private readonly openingSessionIdState = signal<string | null>(null);
-  private readonly suggestionsState = signal<string[]>(MOCK_SUGGESTIONS);
-
-  private newSessionCounter = 0;
-
-  /** The open conversation, or null on the dashboard. */
-  readonly session = this.sessionState.asReadonly();
-
-  /** True while an answer is being generated. */
-  readonly isLoading = this.loadingState.asReadonly();
-
-  /** Starter prompts offered on the dashboard. */
-  readonly suggestions = this.suggestionsState.asReadonly();
-
-  /** The question that opened the open conversation. */
-  readonly question = computed(() => this.sessionState()?.question ?? null);
-
-  /** Turns of the open conversation, oldest first. */
-  readonly messages = computed(() => this.sessionState()?.messages ?? []);
-
-  /** True once the conversation has at least one turn to render. */
-  readonly hasMessages = computed(() => this.messages().length > 0);
-
-  /** True while a stored conversation is being fetched. */
-  readonly isOpeningSession = computed(() => this.openingSessionIdState() !== null);
-
   /**
-   * The most recent completed answer, or null while the newest one is still
-   * pending. Earlier answers are intentionally ignored so the header, the
-   * citations and the not-found card always describe the latest turn.
+   * The turn the view was asked to show, or null to follow the newest one. The
+   * dashboard leaves it null so that asking a question moves the view to the turn
+   * it just created, with no id to thread through the navigation.
    */
-  readonly latestAnswer = computed<AnswerResponse | null>(() => {
-    const last = this.lastAssistantMessage();
+  private readonly requestedTurnIdState = signal<string | null>(null);
 
-    if (!last || last.status === 'pending') {
-      return null;
+  private readonly askingState = signal(false);
+
+  /** Id of the open turn, or null when there is nothing to show. */
+  readonly activeTurnId = computed(() => this.activeTurn()?.id ?? null);
+
+  /** True while a question is being sent or an answer is being retrieved. */
+  readonly isLoading = this.askingState.asReadonly();
+
+  /** True while the session's turns have not arrived yet. */
+  readonly isResolving = computed(() => !this.history.isLoaded());
+
+  /** The open turn, or undefined when the requested id is not one of this session's. */
+  readonly activeTurn = computed<Turn | undefined>(() => {
+    const turns = this.history.turns();
+    const requested = this.requestedTurnIdState();
+
+    if (requested === null) {
+      return turns[turns.length - 1];
     }
 
-    return {
-      text: last.text,
-      status: last.status,
-      sources: last.sources,
-      documentCount: last.documentCount,
-    };
+    return turns.find((turn) => turn.id === requested);
   });
 
-  /** Citations backing the most recent answer. */
-  readonly sources = computed<SourceReference[]>(() => this.latestAnswer()?.sources ?? []);
-
-  /** True when the most recent answer found nothing in the corpus. */
-  readonly isNotFound = computed(() => this.latestAnswer()?.status === 'not-found');
+  /** Title shown in the thread header, which is the question itself. */
+  readonly threadTitle = computed(() => this.activeTurn()?.question ?? '');
 
   /**
-   * `Grounded in 4 documents · Updated 20 September 2026`, or null while the
-   * newest answer is pending.
+   * The thread for the open turn: every turn up to and including it, flattened
+   * into the user and assistant messages the thread renders. Opening an older
+   * turn shows the conversation that led to it rather than a bare answer, which
+   * is what makes a history link worth following.
    */
-  readonly groundingSummary = computed(() => {
-    const question = this.question();
-    const answer = this.latestAnswer();
+  readonly messages = computed<Message[]>(() => {
+    const turns = this.history.turns();
+    const active = this.activeTurn();
 
-    if (!question || !answer || answer.status !== 'answered') {
-      return null;
+    if (!active) {
+      return [];
     }
 
-    const documentCount = answer.documentCount;
-    const noun = documentCount === 1 ? 'document' : 'documents';
+    const lastIndex = turns.findIndex((turn) => turn.id === active.id);
 
-    return `Grounded in ${documentCount} ${noun} · Updated ${formatDocumentDate(
-      question.documentsUpdatedAt,
-    )}`;
+    return turns
+      .slice(0, lastIndex + 1)
+      .flatMap((turn) => [this.toMessage(turn, 'user'), this.toMessage(turn, 'assistant')]);
   });
 
-  /** Topic shown in the thread header. */
-  readonly threadTitle = computed(() => this.question()?.topic ?? '');
+  /** True once the open turn has something to render. */
+  readonly hasMessages = computed(() => this.activeTurn() !== undefined);
 
   /**
-   * Opens a stored conversation. Asking from the dashboard creates a new one;
-   * asking while a conversation is open appends to it.
+   * Asks a question.
+   *
+   * The turn is recorded before the request goes out, so the thread shows the
+   * question and its pending state straight away rather than after the round
+   * trip. That happens only once the session's history has loaded, because a
+   * turn's id is its position in that list, and creating one early could hand it
+   * a position the server then gives to a different question.
    */
   ask(question: string): void {
     const trimmed = question.trim();
@@ -108,146 +98,113 @@ export class ChatService {
       return;
     }
 
-    const turnId = this.nextTurnId();
-    const askedAt = new Date().toISOString();
-    const isNewSession = this.sessionState() === null;
-    const questionModel = isNewSession ? this.createQuestion(trimmed, turnId) : this.question()!;
+    this.history
+      .ready()
+      .pipe(
+        switchMap(() => {
+          const turnId = this.history.appendPendingTurn(trimmed);
+          this.requestedTurnIdState.set(turnId);
 
-    this.sessionState.set({
-      question: questionModel,
-      messages: [
-        ...this.messages(),
-        this.createTurn(turnId, 'user', trimmed, askedAt),
-        this.createTurn(turnId, 'assistant', '', askedAt),
-      ],
-    });
-
-    if (isNewSession) {
-      this.history.upsert({ question: questionModel, answerPreview: '' });
-    }
-
-    this.loadingState.set(true);
-
-    this.api
-      .ask(trimmed)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((answer) => {
-        this.applyAnswer(turnId, answer);
-        this.loadingState.set(false);
-      });
+          return this.dispatch(turnId, trimmed);
+        }),
+        finalize(() => this.askingState.set(false)),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe();
   }
 
-  /** Opens a stored conversation by id. Unknown ids leave the view empty. */
-  openSession(sessionId: string): void {
-    // Re-entering the route of the conversation already open must not discard
-    // the live thread, which is where a freshly asked question is still pending.
-    if (this.sessionState()?.question.id === sessionId) {
+  /**
+   * Asks the open turn's question again after a failure.
+   *
+   * The turn is reused rather than duplicated so it keeps its position, so the
+   * link to it and the highlight in the sidebar stay valid. The backend records
+   * every `/chat` call as a history entry, so a retried question does appear
+   * twice once the session's history is refetched; there is no endpoint that
+   * removes it.
+   */
+  retry(turnId: string): void {
+    const turn = this.history.turnAt(turnId);
+
+    if (!turn || this.askingState()) {
       return;
     }
 
-    this.openingSessionIdState.set(sessionId);
+    this.requestedTurnIdState.set(turnId);
+    this.askingState.set(true);
+    this.history.markTurnPending(turnId);
 
-    this.api
-      .getSession(sessionId)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((session) => {
-        if (session) {
-          this.sessionState.set(session);
-        }
-
-        this.openingSessionIdState.set(null);
-      });
+    this.dispatch(turnId, turn.question)
+      .pipe(finalize(() => this.askingState.set(false)), takeUntilDestroyed(this.destroyRef))
+      .subscribe();
   }
 
-  /** Drops the open conversation and returns the user to the dashboard. */
+  /**
+   * Shows a stored turn. An id that is not in this session's history leaves the
+   * view with nothing to render, which it reports as not found.
+   */
+  openTurn(turnId: string | null): void {
+    this.requestedTurnIdState.set(turnId);
+  }
+
+  /** Stops following a specific turn, so the view returns to the newest one. */
   startNewConversation(): void {
-    this.sessionState.set(null);
-    this.loadingState.set(false);
+    this.requestedTurnIdState.set(null);
   }
 
-  /** The newest assistant turn, pending or not. */
-  private lastAssistantMessage(): Message | undefined {
-    const assistantMessages = this.messages().filter((message) => message.role === 'assistant');
+  /**
+   * Sends one question and writes the outcome back onto its turn.
+   *
+   * Failures are recorded on the turn instead of thrown, so a turn is never left
+   * searching forever and the user has something to retry from. The turn exists
+   * before the session is resolved for the same reason: a session that cannot be
+   * created still leaves the question on screen with an explanation.
+   */
+  private dispatch(turnId: string, question: string): Observable<null> {
+    this.askingState.set(true);
 
-    return assistantMessages[assistantMessages.length - 1];
+    return this.session.ensureSession().pipe(
+      switchMap((sessionId) => this.api.ask(sessionId, question)),
+      map((answer) => {
+        this.history.resolveTurn(turnId, answer);
+
+        return null;
+      }),
+      catchError((error: unknown) => {
+        this.session.handleSessionLoss(error);
+        this.history.failTurn(turnId, this.describeFailure(error));
+
+        return of(null);
+      }),
+    );
   }
 
-  /** Fills in the pending turn of the pair identified by `turnId`. */
-  private applyAnswer(turnId: string, answer: AnswerResponse): void {
-    this.sessionState.update((session) => {
-      if (!session) {
-        return session;
-      }
+  /** Both messages of one turn. The user's half never carries citations. */
+  private toMessage(turn: Turn, role: Message['role']): Message {
+    const isUser = role === 'user';
 
-      // Only the newest turn reflects the question's current answer status.
-      const isNewestTurn =
-        session.messages[session.messages.length - 1]?.id === `${turnId}-assistant`;
-
-      return {
-        question: isNewestTurn
-          ? {
-              ...session.question,
-              answerStatus: answer.status,
-              documentCount: answer.documentCount,
-            }
-          : session.question,
-        messages: session.messages.map((message) => {
-          if (message.id === `${turnId}-assistant`) {
-            return {
-              ...message,
-              text: answer.text,
-              status: answer.status,
-              sources: answer.sources,
-              documentCount: answer.documentCount,
-            };
-          }
-
-          return message.id === `${turnId}-user` ? { ...message, status: answer.status } : message;
-        }),
-      };
-    });
-
-    this.history.updateAnswer(turnId, answer);
-  }
-
-  /** Builds one turn of a question/answer pair. */
-  private createTurn(
-    turnId: string,
-    role: Message['role'],
-    text: string,
-    createdAt: string,
-  ): Message {
     return {
-      id: `${turnId}-${role}`,
+      id: `${turn.id}-${role}`,
       role,
-      text,
-      createdAt,
-      status: 'pending',
-      sources: [],
-      documentCount: 0,
+      text: isUser ? turn.question : turn.answer,
+      createdAt: turn.createdAt,
+      status: turn.status,
+      sources: isUser ? [] : turn.sources,
+      documentCount: isUser
+        ? 0
+        : new Set(turn.sources.map((source) => source.document)).size,
     };
   }
 
-  /** Monotonic id for a question/answer pair opened in this browser session. */
-  private nextTurnId(): string {
-    this.newSessionCounter += 1;
+  /**
+   * What a failed turn says. A question the backend rejected is the user's to
+   * fix, so its own wording is passed through with a nudge to rephrase; anything
+   * else reads as temporary and invites a retry.
+   */
+  private describeFailure(error: unknown): string {
+    if (error instanceof ApiError) {
+      return error.isTransient ? error.message : `${error.message} Try rephrasing your question.`;
+    }
 
-    return `turn-${this.newSessionCounter}`;
-  }
-
-  /** Builds the question model for a conversation opened in this session. */
-  private createQuestion(text: string, id: string): Question {
-    const now = new Date().toISOString();
-
-    return {
-      id,
-      title: text,
-      topic: text,
-      askedAt: now,
-      updatedAt: now,
-      answerStatus: 'pending',
-      documentCount: 0,
-      documentsUpdatedAt: now,
-    };
+    return 'Something went wrong reaching the assistant. Please try again.';
   }
 }

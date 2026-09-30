@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   ElementRef,
+  afterRenderEffect,
   computed,
   inject,
   viewChild,
@@ -55,6 +56,7 @@ const FOCUSABLE_SELECTOR =
       ></button>
 
       <aside
+        #sidebar
         id="app-sidebar"
         class="fixed inset-y-0 left-0 z-50 flex shrink-0 flex-col overflow-hidden shadow-raised
           transition-[width,translate] duration-shell ease-out-soft
@@ -64,7 +66,7 @@ const FOCUSABLE_SELECTOR =
         [class.-translate-x-full]="layout.mode() === 'hidden'"
         [inert]="layout.mode() === 'hidden'"
       >
-        <app-chat-sidebar #sidebar />
+        <app-chat-sidebar />
       </aside>
 
       <main
@@ -83,10 +85,66 @@ export class AppComponent {
   /** Responsive shell state: breakpoints, collapse preference and drawer. */
   protected readonly layout = inject(LayoutService);
 
-  private readonly sidebar = viewChild<ElementRef<HTMLElement>>('sidebar');
+  /**
+   * The drawer element.
+   *
+   * The ref is on the `<aside>` rather than on `<app-chat-sidebar>`: a ref on a
+   * component resolves to that component's instance, not to an `ElementRef`, so
+   * `.nativeElement` would be undefined and the `querySelectorAll` below it would
+   * match nothing. That is how a focus trap can read as correct and trap nothing
+   * at all, so the ref is kept on the element it describes.
+   */
+  private readonly sidebar = viewChild.required<ElementRef<HTMLElement>>('sidebar');
 
   /** True while the sidebar covers the content and should trap focus. */
   private readonly isDrawerModal = computed(() => this.layout.isBackdropVisible());
+
+  /** Where focus came from when the drawer opened, to give it back on close. */
+  private focusBeforeDrawer: HTMLElement | null = null;
+
+  /** The drawer's last modal state, so only the transition is acted on. */
+  private wasDrawerModal = false;
+
+  constructor() {
+    // A modal drawer has to take focus, or the trap below never engages: it only
+    // rewrites Tab at the drawer's first and last control, which focus never
+    // reaches if it is still out in the content behind the backdrop. Closing it
+    // without handing focus back strands the user at the top of the document.
+    //
+    // `afterRenderEffect` rather than `effect`, because the drawer is `inert`
+    // while it is closed and only reachable once the binding that removes that
+    // has been applied, which happens during render.
+    afterRenderEffect(() => {
+      const modal = this.isDrawerModal();
+
+      // Only the transition matters. Re-focusing on every render would drag focus
+      // back to the first control while someone was part way down it, and the
+      // close case has to fire even though focus is still sitting inside the
+      // drawer that just became inert.
+      if (modal === this.wasDrawerModal) {
+        return;
+      }
+
+      this.wasDrawerModal = modal;
+
+      if (modal) {
+        this.focusBeforeDrawer =
+          document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        this.focusableElements()[0]?.focus();
+
+        return;
+      }
+
+      const target = this.focusBeforeDrawer;
+      this.focusBeforeDrawer = null;
+
+      // The control that opened the drawer may have been navigated away from, in
+      // which case there is nowhere to go back to and focus is left alone.
+      if (target?.isConnected) {
+        target.focus();
+      }
+    });
+  }
 
   /**
    * Keeps Tab inside the sidebar while it is a modal drawer, so keyboard users
@@ -121,8 +179,8 @@ export class AppComponent {
 
   /** Focusable controls inside the sidebar, in tab order. */
   private focusableElements(): HTMLElement[] {
-    const host = this.sidebar()?.nativeElement;
-
-    return host ? Array.from(host.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)) : [];
+    return Array.from(
+      this.sidebar().nativeElement.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+    );
   }
 }

@@ -1,11 +1,25 @@
-/** Product-level limits shared by the question input and the services. */
+/**
+ * Limits the composer enforces, matching the backend's own bounds on
+ * `ChatRequest.question`. Agreeing with the server here is what keeps a
+ * rejected question from ever leaving the browser: the API answers anything
+ * shorter than three or longer than 500 characters with a 422.
+ */
+export const MIN_QUESTION_LENGTH = 3;
 export const MAX_QUESTION_LENGTH = 500;
 
 /** Placeholder shown in the composer when it is empty. */
 export const QUESTION_PLACEHOLDER = 'Ask a question about company policies...';
 
-/** Contact shown when an answer finds nothing. */
-export const HR_CONTACT_EMAIL = 'hr@company.com';
+/**
+ * Starter prompts on the dashboard. Product copy rather than data: the backend
+ * has no endpoint for them, and inventing one would mean guessing at a contract
+ * it does not have.
+ */
+export const STARTER_QUESTIONS: readonly string[] = [
+  'How many annual leave days do I have?',
+  'How do I set up my company email?',
+  'What do I need to complete during onboarding?',
+];
 
 /** Key used to remember the desktop sidebar preference. */
 export const SIDEBAR_PREFERENCE_KEY = 'ika.sidebar.collapsed';
