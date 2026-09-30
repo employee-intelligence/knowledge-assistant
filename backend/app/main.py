@@ -6,10 +6,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import QA, SessionLocal, init_db
+from app.database import QA, SessionLocal, create_session, get_valid_session, init_db
 from app.rag.engine import Assistant
 from app.rag.ingest import build_index
-from app.schemas import ChatRequest, ChatResponse, HistoryItem
+from app.schemas import ChatRequest, ChatResponse, HistoryItem, SessionCreateResponse
 
 state: dict = {}
 
@@ -53,8 +53,21 @@ def documents():
     return state["documents"]
 
 
+@app.post("/sessions", response_model=SessionCreateResponse)
+def create_session_endpoint(db: Session = Depends(get_db)):
+    session = create_session(db)
+    return {"session_id": session.id, "expires_at": session.expires_at}
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, db: Session = Depends(get_db)):
+    session = get_valid_session(db, req.session_id)
+    if session is None:
+        return {
+            "answer": "Session expired or invalid. Please create a new session.",
+            "answered": False,
+            "sources": [],
+        }
     result = state["assistant"].ask(req.question)
     db.add(QA(session_id=req.session_id, question=req.question, **result))
     db.commit()

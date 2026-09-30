@@ -20,6 +20,11 @@ class ChatResponse(BaseModel):
     sources: list[Source] = []
 
 
+class SessionCreateResponse(BaseModel):
+    session_id: str
+    expires_at: datetime
+
+
 class HistoryItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
