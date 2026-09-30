@@ -44,11 +44,7 @@ import { LoadingIndicatorComponent } from '../../shared/components/loading-indic
 
     <div class="shrink-0 px-4 pb-4 sm:px-6 sm:pb-5 lg:px-8 lg:pb-6">
       <div class="mx-auto w-full max-w-thread">
-        <app-question-input
-          [isBusy]="chat.isLoading()"
-          [showCounter]="true"
-          (ask)="onAsk($event)"
-        />
+        <app-question-input [isBusy]="chat.isLoading()" (ask)="onAsk($event)" />
       </div>
     </div>
   `,
