@@ -5,12 +5,17 @@ import { startWith } from 'rxjs';
 
 import { ButtonComponent } from '../../../../shared/components/button/button.component';
 import { IconComponent } from '../../../../shared/components/icon/icon.component';
-import { MAX_QUESTION_LENGTH, QUESTION_PLACEHOLDER } from '../../../../shared/utils/constants';
+import { MAX_QUESTION_LENGTH, MIN_QUESTION_LENGTH, QUESTION_PLACEHOLDER } from '../../../../shared/utils/constants';
 
 /**
  * The composer. A reactive form owns the text so validation, the character
  * limit and keyboard submission live in one place and the control stays
  * accessible and testable.
+ *
+ * The attach control that used to sit on the left is gone. It was disabled from
+ * the start, and offering a control that cannot do anything is a promise the app
+ * cannot keep, so it was removed rather than hidden. The `paperclip` icon is left
+ * in the icon set for when attaching is actually built.
  */
 @Component({
   selector: 'app-question-input',
@@ -23,18 +28,6 @@ import { MAX_QUESTION_LENGTH, QUESTION_PLACEHOLDER } from '../../../../shared/ut
         class="flex items-start gap-2 rounded-xl border border-border bg-card px-3 py-2 shadow-raised
           transition-colors focus-within:border-primary/40 sm:items-center sm:gap-3 sm:px-4 sm:py-3"
       >
-        <button
-          app-button
-          type="button"
-          variant="ghost"
-          size="icon"
-          class="-ml-1 shrink-0"
-          aria-label="Attach a document"
-          disabled
-        >
-          <app-icon name="paperclip" [size]="18" />
-        </button>
-
         <textarea
           formControlName="question"
           rows="1"
@@ -76,9 +69,17 @@ export class QuestionInputComponent {
   /** Maximum accepted question length. */
   protected readonly maxLength = MAX_QUESTION_LENGTH;
 
-  /** The question form, reset after every submission. */
+  /**
+   * The question form, reset after every submission.
+   *
+   * The length validators are the backend's own bounds. Matching them here is
+   * what stops a question the API would reject with a 422 from being sent at all.
+   */
   protected readonly form = this.formBuilder.group({
-    question: ['', [Validators.required, Validators.maxLength(MAX_QUESTION_LENGTH)]],
+    question: [
+      '',
+      [Validators.required, Validators.minLength(MIN_QUESTION_LENGTH), Validators.maxLength(MAX_QUESTION_LENGTH)],
+    ],
   });
 
   /** Current text as a signal, so validation state drives the template. */
@@ -87,9 +88,17 @@ export class QuestionInputComponent {
     { initialValue: '' },
   );
 
-  /** True when there is something to send and no request is in flight. */
+  /**
+   * True when there is something to send and no request is in flight.
+   *
+   * The length is measured on the trimmed value, which is what actually gets
+   * sent, so padding does not decide whether the backend accepts the question.
+   */
   protected readonly canSubmit = computed(
-    () => this.value().trim().length > 0 && this.form.controls.question.valid && !this.isBusy(),
+    () =>
+      this.value().trim().length >= MIN_QUESTION_LENGTH &&
+      this.form.controls.question.valid &&
+      !this.isBusy(),
   );
 
   /** Submits the question and clears the field. */
