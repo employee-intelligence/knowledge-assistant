@@ -1,7 +1,7 @@
 import { isPlatformBrowser } from '@angular/common';
 import { DestroyRef, Injectable, PLATFORM_ID, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { Observable, ReplaySubject, catchError, of, switchMap } from 'rxjs';
+import { Observable, ReplaySubject, catchError, of } from 'rxjs';
 
 import { toDateBucket, type DateBucket } from '../../shared/utils/format-date.util';
 import { AnswerResponse } from '../models/message.model';
@@ -52,6 +52,9 @@ function reindex(turns: Turn[]): Turn[] {
  * - A turn is identified by its position. The backend returns no per-question
  *   id, and because a session's history only grows at the end, a position is
  *   stable across reloads. That is what makes `/response/:id` a usable link.
+ *
+ * Nothing here opens a session. A browser with nothing stored has no history to
+ * fetch, and the session belongs to the first question asked in it.
  */
 @Injectable({ providedIn: 'root' })
 export class HistoryService {
@@ -158,14 +161,29 @@ export class HistoryService {
     return this.settled.asObservable();
   }
 
-  /** Fetches the session's turns from the backend. */
+  /** Fetches the session's turns, but only if there is a session to fetch. */
   load(): void {
+    const sessionId = this.session.sessionId();
+
+    // A browser with no stored session has no conversation to restore, so it
+    // fetches nothing. The session is opened by the first question instead, which
+    // is the only thing that needs one. Opening it here meant every visit paid for
+    // a session before the user had asked anything, and left a second call to
+    // `/sessions` in the log of a first question that the page load had already
+    // accounted for.
+    if (!sessionId) {
+      this.turnsState.set([]);
+      this.loadedState.set(true);
+      this.markSettled();
+
+      return;
+    }
+
     this.loadingState.set(true);
 
-    this.session
-      .ensureSession()
+    this.api
+      .getHistory(sessionId)
       .pipe(
-        switchMap((sessionId) => this.api.getHistory(sessionId)),
         catchError((error: unknown) => {
           // A session the backend no longer knows about is gone for good, so it
           // is dropped rather than retried and the turns that belonged to it go
@@ -176,7 +194,6 @@ export class HistoryService {
 
           if (isLost) {
             this.session.handleSessionLoss(error);
-            this.clear();
           } else {
             console.error('Could not load question history', error);
           }

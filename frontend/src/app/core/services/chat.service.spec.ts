@@ -21,17 +21,16 @@ describe('ChatService', () => {
   let session: SessionService;
   let http: HttpTestingController;
 
-  /**
-   * Injects the service with a session already open and its history landed, which
-   * is the settled state an ask normally starts from.
+/**
+   * Injects the service with a stored session whose history has landed, which is
+   * the settled state an ask normally starts from.
    */
   const givenSettledSession = (): void => {
     injectService();
-    openSession();
     http.expectOne(`${API_BASE_URL}/history/sess-1234`).flush([]);
   };
 
-  /** Injects the service, which starts a session and fetches its history. */
+  /** Injects the service, which restores the history of a session already stored. */
   const injectService = (): HttpTestingController => {
     chat = TestBed.inject(ChatService);
     history = TestBed.inject(HistoryService);
@@ -41,7 +40,15 @@ describe('ChatService', () => {
     return http;
   };
 
-  /** Answers the session creation the service makes on construction. */
+  /** Puts a live session in storage, as a reload of an active browser finds one. */
+  const givenStoredSession = (): void => {
+    sessionStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({ id: 'sess-1234', expiresAt: Date.now() + 3_600_000 }),
+    );
+  };
+
+  /** Answers the session creation the first question triggers. */
   const openSession = (): void => {
     http.expectOne(`${API_BASE_URL}/sessions`).flush({
       session_id: 'sess-1234',
@@ -56,6 +63,10 @@ describe('ChatService', () => {
 
   beforeEach(() => {
     sessionStorage.clear();
+
+    // A browser that has asked something before, which is the state most of these
+    // start from. Tests that care about the very first visit set their own.
+    givenStoredSession();
 
     // Configured but deliberately not injected: the services load on
     // construction, so each test chooses when that happens.
@@ -383,15 +394,11 @@ describe('ChatService', () => {
   it('waits for the session history to land before numbering a new turn', () => {
     injectService();
 
-    // The session is slow to open, so the ask is queued behind it rather than
-    // numbering a turn against a list that is about to arrive.
+    // The history is slow to arrive, so the ask is queued behind it rather than
+    // numbering a turn against a list that is about to land.
     chat.ask('First?');
     expect(chat.hasMessages()).toBe(false);
 
-    http.expectOne(`${API_BASE_URL}/sessions`).flush({
-      session_id: 'sess-1234',
-      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
-    });
     http.expectOne(`${API_BASE_URL}/history/sess-1234`).flush([
       {
         question: 'Older question',
@@ -402,10 +409,58 @@ describe('ChatService', () => {
       },
     ]);
 
+    // A turn needs a session to be posted under, so this is where one opens if
+    // there was not already one, which there was here.
     http.expectOne(`${API_BASE_URL}/chat`).flush({ answer: 'Yes.', answered: true, sources: [] });
 
     // Position 1, not 0: the server's turn kept the position it has on reload.
     expect(chat.activeTurnId()).toBe('1');
     expect(history.turns().map((turn) => turn.question)).toEqual(['Older question', 'First?']);
+  });
+
+  describe('a browser that has never asked anything', () => {
+    beforeEach(() => sessionStorage.clear());
+
+    it('spends no request at all before the first question', () => {
+      injectService();
+
+      // Nothing stored means no conversation to restore, so the page load opens no
+      // session and fetches no history.
+      http.expectNone(`${API_BASE_URL}/sessions`);
+      http.expectNone(`${API_BASE_URL}/history/sess-1234`);
+    });
+
+    it('opens one session for the first question and keeps it for the rest', () => {
+      injectService();
+      chat.ask('How much leave?');
+
+      const created = http.expectOne(`${API_BASE_URL}/sessions`);
+
+      created.flush({
+        session_id: 'sess-1234',
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+
+      const first = http.expectOne(`${API_BASE_URL}/chat`);
+
+      expect(first.request.body).toEqual({ session_id: 'sess-1234', question: 'How much leave?' });
+      first.flush({ answer: 'Twenty days.', answered: true, sources: [] });
+
+      chat.ask('And carryover?');
+
+      // One session covers the whole conversation, not one per question.
+      http.expectNone(`${API_BASE_URL}/sessions`);
+      const second = http.expectOne(`${API_BASE_URL}/chat`);
+
+      expect(second.request.body).toEqual({ session_id: 'sess-1234', question: 'And carryover?' });
+      second.flush({ answer: 'Five days.', answered: true, sources: [] });
+
+      expect(chat.messages().map((message) => message.text)).toEqual([
+        'How much leave?',
+        'Twenty days.',
+        'And carryover?',
+        'Five days.',
+      ]);
+    });
   });
 });

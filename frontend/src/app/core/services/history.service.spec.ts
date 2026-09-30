@@ -2,7 +2,7 @@ import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 
-import { API_BASE_URL } from '../api.config';
+import { API_BASE_URL, SESSION_STORAGE_KEY } from '../api.config';
 import { AnswerResponse, SourceReference } from '../models/message.model';
 import { HistoryService } from './history.service';
 
@@ -55,7 +55,7 @@ describe('HistoryService', () => {
     sessionStorage.clear();
   });
 
-  /** Injects the service, which starts a session and fetches its history. */
+  /** Injects the service, which fetches the history of a session already stored. */
   const injectService = (): HttpTestingController => {
     history = TestBed.inject(HistoryService);
     http = TestBed.inject(HttpTestingController);
@@ -63,28 +63,47 @@ describe('HistoryService', () => {
     return http;
   };
 
-  /** Answers the session creation the service makes on construction. */
-  const openSession = (): void => {
-    http.expectOne(`${API_BASE_URL}/sessions`).flush({
-      session_id: SESSION_ID,
-      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
-    });
+  /**
+   * Puts a live session in storage, which is what a reload of a browser that has
+   * already asked something finds. The service fetches history for a session that
+   * is already there and opens none of its own.
+   */
+  const givenStoredSession = (): void => {
+    sessionStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({ id: SESSION_ID, expiresAt: Date.now() + 3_600_000 }),
+    );
   };
 
   /** Runs the constructor's load all the way through, landing the given history. */
   const givenHistory = (items: unknown[]): void => {
+    givenStoredSession();
     injectService();
-    openSession();
     http.expectOne(`${API_BASE_URL}/history/${SESSION_ID}`).flush(items);
   };
 
-  it('starts empty and loads from the backend rather than from invented data', () => {
+  it('asks for nothing on a browser that has never asked anything', () => {
     injectService();
 
-    expect(history.turns()).toEqual([]);
-    expect(history.hasHistory()).toBe(false);
+    // No stored session means no conversation to restore, so the page load spends
+    // no request at all. The session belongs to the first question.
+    http.expectNone(`${API_BASE_URL}/sessions`);
+    http.expectNone(`${API_BASE_URL}/history/${SESSION_ID}`);
 
-    openSession();
+    expect(history.turns()).toEqual([]);
+    expect(history.isLoading()).toBe(false);
+    // Loaded anyway, so a question asked here is not held back waiting for a fetch
+    // that was never going to be made.
+    expect(history.isLoaded()).toBe(true);
+  });
+
+  it('restores the conversation a reload left behind', () => {
+    givenStoredSession();
+    injectService();
+
+    // One request, for the history that exists. No new session is opened over it.
+    http.expectNone(`${API_BASE_URL}/sessions`);
+
     // Newest first, as the endpoint returns, so the reversal in the API service is
     // what puts the conversation in the order a thread is read in.
     http.expectOne(`${API_BASE_URL}/history/${SESSION_ID}`).flush([
@@ -117,8 +136,8 @@ describe('HistoryService', () => {
   });
 
   it('reports being loaded until the fetch lands, then stops', () => {
+    givenStoredSession();
     injectService();
-    openSession();
 
     expect(history.isLoading()).toBe(true);
     expect(history.isLoaded()).toBe(false);
@@ -257,10 +276,10 @@ describe('HistoryService', () => {
   it('settles ready() once the first load lands, so asks cannot race it', () => {
     let ready = false;
 
+    givenStoredSession();
     injectService();
     history.ready().subscribe(() => (ready = true));
 
-    openSession();
     expect(ready).toBe(false);
 
     http.expectOne(`${API_BASE_URL}/history/${SESSION_ID}`).flush([]);
@@ -275,11 +294,12 @@ describe('HistoryService', () => {
   it('settles ready() even when the load fails, so a dead backend cannot wedge asks', () => {
     let ready = false;
 
+    givenStoredSession();
     injectService();
     history.ready().subscribe(() => (ready = true));
 
     http
-      .expectOne(`${API_BASE_URL}/sessions`)
+      .expectOne(`${API_BASE_URL}/history/${SESSION_ID}`)
       .flush('boom', { status: 500, statusText: 'Error' });
 
     expect(ready).toBe(true);

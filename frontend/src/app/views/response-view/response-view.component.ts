@@ -3,8 +3,6 @@ import { toSignal } from '@angular/core/rxjs-interop';
 import { ActivatedRoute, Router } from '@angular/router';
 import { map } from 'rxjs';
 
-import { ButtonComponent } from '../../shared/components/button/button.component';
-import { IconComponent } from '../../shared/components/icon/icon.component';
 import { ChatService } from '../../core/services/chat.service';
 import { QuestionInputComponent } from '../../features/ask/components/question-input/question-input.component';
 import { ViewHeaderComponent } from '../../features/chat/components/view-header/view-header.component';
@@ -26,9 +24,7 @@ import { ChatThreadComponent } from '../../features/response/components/chat-thr
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
     AnswerPendingComponent,
-    ButtonComponent,
     ChatThreadComponent,
-    IconComponent,
     QuestionInputComponent,
     ViewHeaderComponent,
   ],
@@ -52,30 +48,6 @@ import { ChatThreadComponent } from '../../features/response/components/chat-thr
       </div>
 
       <span class="sr-only" role="status">Loading this conversation.</span>
-    } @else if (chat.sessionExpired()) {
-      <!-- An expiry is reported before the empty state, because "no questions"
-           is true here and unhelpful on its own: the user needs to know their
-           conversation is recoverable by starting over, not that it was empty.
-           The alert role is because this is an error being reported rather
-           than a state being shown, so it is announced instead of waiting to be
-           found. The composer is gone for the same reason this screen is here: a
-           follow-up typed now would open a fresh session and quietly start an
-           empty thread, which is the opposite of what being told the session
-           expired is asking for. -->
-      <div
-        class="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center"
-        role="alert"
-      >
-        <h2 class="font-headings text-lg font-semibold text-foreground">Session expired</h2>
-        <p class="max-w-sm text-sm leading-relaxed text-muted-foreground">
-          This conversation's session has expired, so the questions asked in it are no longer
-          available. Start a new conversation to ask again.
-        </p>
-        <button app-button type="button" variant="outline" (click)="onNewConversation()">
-          <app-icon name="plus" [size]="16" />
-          <span>New Conversation</span>
-        </button>
-      </div>
     } @else if (chat.isEmpty()) {
       <!-- An empty session is a conversation waiting for a question, which is a
            different thing from a question that could not be found. -->
@@ -100,15 +72,11 @@ import { ChatThreadComponent } from '../../features/response/components/chat-thr
       />
     }
 
-    @if (!chat.sessionExpired()) {
-      <!-- Kept out of the way while the expiry stands, so the only way forward is
-           the new conversation it asks for. -->
-      <div class="shrink-0 px-4 pb-4 sm:px-6 sm:pb-5 lg:px-8 lg:pb-6">
-        <div class="mx-auto w-full max-w-thread">
-          <app-question-input [isBusy]="chat.isLoading()" (ask)="onAsk($event)" />
-        </div>
+    <div class="shrink-0 px-4 pb-4 sm:px-6 sm:pb-5 lg:px-8 lg:pb-6">
+      <div class="mx-auto w-full max-w-thread">
+        <app-question-input [isBusy]="chat.isLoading()" (ask)="onAsk($event)" />
       </div>
-    }
+    </div>
   `,
 })
 export class ResponseViewComponent {
@@ -138,6 +106,26 @@ export class ResponseViewComponent {
     this.chat.openTurn(untracked(this.turnId));
   });
 
+  /**
+   * Goes home when the session behind the open conversation is gone.
+   *
+   * A session the backend has dropped takes the whole conversation with it, and
+   * every turn in it is filed under that id, so there is nothing on this screen
+   * left to read or retry. The service has already reset the conversation to an
+   * empty one; routing home puts the user in front of a composer for the next
+   * question, which opens the session that replaces this one.
+   *
+   * An effect rather than a branch in the template, because the route change is
+   * the whole of the recovery. Rendering an expiry notice here would put a page
+   * about a conversation that no longer exists in front of the user instead of
+   * the empty conversation that does.
+   */
+  private readonly goHomeWhenSessionEnds = effect(() => {
+    if (this.chat.sessionExpired()) {
+      void this.router.navigate(['/']);
+    }
+  });
+
   /** Asks a follow-up question inside the open conversation. */
   protected onAsk(question: string): void {
     this.chat.ask(question);
@@ -146,17 +134,5 @@ export class ResponseViewComponent {
   /** Asks a failed turn's question again. */
   protected onRetry(turnId: string): void {
     this.chat.retry(turnId);
-  }
-
-  /**
-   * Starts a fresh conversation after an expiry.
-   *
-   * Navigating rather than clearing in place, so the expired session is retired
-   * and the user lands on the dashboard with a composer rather than on an empty
-   * thread they have to leave anyway.
-   */
-  protected onNewConversation(): void {
-    this.chat.startNewConversation();
-    void this.router.navigate(['/']);
   }
 }
