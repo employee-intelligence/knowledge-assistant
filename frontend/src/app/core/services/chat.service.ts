@@ -194,11 +194,12 @@ export class ChatService {
    * before the session is resolved for the same reason: a session that cannot be
    * created still leaves the question on screen with an explanation.
    *
-   * A session the backend will not accept is the exception. The question was never
-   * asked, so a failed-answer card on the turn would be a lie, and every turn
-   * beside it was filed under the same dead id. The turns go and the expiry takes
-   * over the view, which is the one screen that can tell the user what happened and
-   * offer to start again.
+   * A session the backend will not accept is the exception, because nothing can be
+   * recorded for it. The question was never asked, so a failed-answer card would be
+   * a lie, and every turn beside it was filed under the same dead id. The
+   * conversation is reset to what a fresh landing looks like and left there: there
+   * is nothing of this one left to show, and the next question opens the session
+   * that replaces it.
    */
   private dispatch(turnId: string, question: string): Observable<null> {
     this.askingState.set(true);
@@ -214,6 +215,7 @@ export class ChatService {
         this.session.handleSessionLoss(error);
 
         if (this.session.sessionExpired()) {
+          this.requestedTurnIdState.set(null);
           this.history.clear();
 
           return of(null);
