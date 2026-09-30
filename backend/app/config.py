@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     min_score: float = 0.45
     database_url: str = "postgresql://user:password@localhost:5432/knowledge_assistant"
     allowed_origins: str = "*"
+    jwt_secret_key: str = "change-me-in-production"
 
     # Per-model attempts before moving to the next one in the chain.
     llm_max_attempts: int = 3
