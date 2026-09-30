@@ -19,9 +19,9 @@ class Session(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
-    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class QA(Base):
@@ -34,7 +34,7 @@ class QA(Base):
     answered: Mapped[bool] = mapped_column(Boolean)
     sources: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
 
@@ -53,7 +53,10 @@ def get_valid_session(db: SessionLocal, session_id: str) -> Session | None:
     session = db.get(Session, session_id)
     if session is None:
         return None
-    if session.expires_at < datetime.now(timezone.utc):
+    expires_at = session.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
         db.delete(session)
         db.commit()
         return None
