@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, String, Text, create_engine
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from app.config import settings
 
@@ -14,10 +14,24 @@ class Base(DeclarativeBase):
     pass
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    hashed_password: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(20), default="staff")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
 class ChatSession(Base):
     __tablename__ = "sessions"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -29,6 +43,7 @@ class QA(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), index=True)
     question: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
     answered: Mapped[bool] = mapped_column(Boolean)
@@ -39,9 +54,10 @@ class QA(Base):
     )
 
 
-def create_session(db: Session, ttl_hours: int = 24) -> ChatSession:
+def create_session(db: Session, user_id: str, ttl_hours: int = 24) -> ChatSession:
     session = ChatSession(
         id=uuid4().hex,
+        user_id=user_id,
         expires_at=datetime.now(timezone.utc) + timedelta(hours=ttl_hours),
     )
     db.add(session)
@@ -62,6 +78,14 @@ def get_valid_session(db: Session, session_id: str) -> ChatSession | None:
         db.commit()
         return None
     return session
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def init_db() -> None:
