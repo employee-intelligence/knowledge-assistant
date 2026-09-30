@@ -107,7 +107,13 @@ export class LayoutService {
     }
   }
 
-  /** Label for the control that toggles the sidebar. */
+  /**
+   * Label for the control that toggles the sidebar.
+   *
+   * All three states name the same object, the sidebar. "Open menu" described the
+   * glyph rather than the thing it reveals, and screen reader users tabbing the
+   * header were offered a different control on each pass through it.
+   */
   readonly toggleLabel = computed(() => {
     switch (this.mode()) {
       case 'expanded':
@@ -115,7 +121,7 @@ export class LayoutService {
       case 'rail':
         return 'Expand sidebar';
       case 'hidden':
-        return 'Open menu';
+        return 'Open sidebar';
     }
   });
 

@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, effect, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, effect, inject, untracked } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { ActivatedRoute } from '@angular/router';
 import { map } from 'rxjs';
@@ -10,9 +10,14 @@ import { ChatThreadComponent } from '../../features/response/components/chat-thr
 import { LoadingIndicatorComponent } from '../../shared/components/loading-indicator/loading-indicator.component';
 
 /**
- * Shows one conversation: its answer, its citations, and the composer for
- * follow-up questions. A view only assembles components and connects them to
- * services.
+ * Shows one conversation: the turn that was asked for, everything that led to
+ * it, and the composer for follow-up questions. A view only assembles components
+ * and connects them to services.
+ *
+ * The route's `:id` is the turn's position in the session. It is optional, and
+ * `/response` with no id follows the newest turn, which is where a question sent
+ * from the dashboard lands. Positions are stable because the backend's history
+ * for a session only grows at the end.
  */
 @Component({
   selector: 'app-response-view',
@@ -27,19 +32,23 @@ import { LoadingIndicatorComponent } from '../../shared/components/loading-indic
   template: `
     <app-view-header [title]="chat.threadTitle()" />
 
-    @if (isEmpty()) {
+    @if (chat.isResolving()) {
       <div class="flex min-h-0 flex-1 items-center justify-center py-10">
         <app-loading-indicator [showDots]="false" />
       </div>
     } @else if (!chat.hasMessages()) {
       <div class="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <h2 class="font-headings text-lg font-semibold text-foreground">Conversation not found</h2>
+        <h2 class="font-headings text-lg font-semibold text-foreground">Question not found</h2>
         <p class="max-w-sm text-sm leading-relaxed text-muted-foreground">
-          This question is no longer in your history. Ask a new one from the dashboard.
+          This question is not in the current session. Sessions expire, and a new one starts empty.
         </p>
       </div>
     } @else {
-      <app-chat-thread [messages]="chat.messages()" (viewed)="onSourceViewed()" />
+      <app-chat-thread
+        [messages]="chat.messages()"
+        [isBusy]="chat.isLoading()"
+        (retry)="onRetry($event)"
+      />
     }
 
     <div class="shrink-0 px-4 pb-4 sm:px-6 sm:pb-5 lg:px-8 lg:pb-6">
@@ -55,41 +64,33 @@ export class ResponseViewComponent {
 
   private readonly route = inject(ActivatedRoute);
 
-  /** The `:id` segment, which decides which conversation is shown. */
-  private readonly sessionId = toSignal(
-    this.route.paramMap.pipe(map((params) => params.get('id'))),
-    {
-      initialValue: null,
-    },
-  );
-
   /**
-   * Route-driven state: whenever the id changes, that conversation is opened.
-   * Navigating away and back therefore restores the right thread.
+   * The `:id` segment, which decides which turn is shown. Null on `/response`,
+   * where the newest turn is followed instead.
    */
-  private readonly loadSession = effect(() => {
-    const id = this.sessionId();
-
-    if (id) {
-      this.chat.openSession(id);
-    }
+  private readonly turnId = toSignal(this.route.paramMap.pipe(map((params) => params.get('id'))), {
+    initialValue: null,
   });
 
-  /** True while the view is still waiting for a conversation to arrive. */
-  protected isEmpty(): boolean {
-    return this.chat.isOpeningSession() && !this.chat.hasMessages();
-  }
+  /**
+   * Route-driven state: whenever the id changes, that turn becomes the open one.
+   * Navigating away and back therefore restores the right conversation.
+   *
+   * `untracked` because the id is the only input. Reading the open turn here too
+   * would make the effect re-run on every answer arriving, which is `openTurn`'s
+   * job to ignore anyway.
+   */
+  private readonly openRoutedTurn = effect(() => {
+    this.chat.openTurn(untracked(this.turnId));
+  });
 
   /** Asks a follow-up question inside the open conversation. */
   protected onAsk(question: string): void {
     this.chat.ask(question);
   }
 
-  /**
-   * Opens a cited document. Phase 1 ships no document viewer, so the click is
-   * a no-op placeholder for the Phase 2 route.
-   */
-  protected onSourceViewed(): void {
-    // Reserved for the document route added with the API integration.
+  /** Asks a failed turn's question again. */
+  protected onRetry(turnId: string): void {
+    this.chat.retry(turnId);
   }
 }

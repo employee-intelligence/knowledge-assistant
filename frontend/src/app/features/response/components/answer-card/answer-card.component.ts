@@ -5,12 +5,12 @@ import {
   computed,
   inject,
   input,
-  output,
   signal,
 } from '@angular/core';
 
 import { Message, SourceReference } from '../../../../core/models/message.model';
 import { COPY_FEEDBACK_MS } from '../../../../shared/utils/constants';
+import { markdownToHtml } from '../../../../shared/utils/markdown.util';
 import { ButtonComponent } from '../../../../shared/components/button/button.component';
 import { IconComponent } from '../../../../shared/components/icon/icon.component';
 import { SourceTagComponent } from '../source-tag/source-tag.component';
@@ -48,12 +48,19 @@ interface Citation extends SourceReference {
         {{ hasCopied() ? 'Copied' : 'Copy' }}
       </button>
 
-      <p class="pr-16 text-sm leading-relaxed text-foreground">{{ message().text }}</p>
+      <div class="answer-prose pr-16 text-sm leading-relaxed text-foreground" [innerHTML]="html()"></div>
+
+      @if (grounding(); as summary) {
+        <p class="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <app-icon name="shield-check" [size]="12" class="shrink-0 text-success" />
+          {{ summary }}
+        </p>
+      }
 
       @if (citations().length > 0) {
         <div class="mt-3 flex flex-col gap-2">
           @for (citation of citations(); track citation.key) {
-            <app-source-tag [source]="citation" (viewed)="viewed.emit($event)" />
+            <app-source-tag [source]="citation" />
           }
         </div>
       }
@@ -66,19 +73,49 @@ export class AnswerCardComponent {
   /** The answer turn to render. */
   readonly message = input.required<Message>();
 
-  /** Emits when a citation is opened. */
-  readonly viewed = output<SourceReference>();
+  /**
+   * The answer, converted from markdown.
+   *
+   * Bound as HTML so bold labels, lists and tables render as themselves instead
+   * of showing their markers. The conversion escapes the source before emitting
+   * any tag, and Angular still sanitizes the bound string, so nothing the
+   * assistant returns can introduce markup of its own.
+   */
+  protected readonly html = computed(() => markdownToHtml(this.message().text));
 
   /** True for a moment after the answer text is copied. */
   protected readonly hasCopied = signal(false);
 
-  /** The answer's citations, each with a stable list key. */
+  /**
+   * The answer's citations, each with a stable list key.
+   *
+   * Two citations of the same section are keyed apart by their position, because
+   * the backend returns no id and the same document and section can legitimately
+   * be cited twice with different passages.
+   */
   protected readonly citations = computed<Citation[]>(() =>
-    this.message().sources.map((source) => ({
+    this.message().sources.map((source, index) => ({
       ...source,
-      key: `${source.document}-${source.section}-${source.page}`,
+      key: `${source.document}-${source.section}-${index}`,
     })),
   );
+
+  /**
+   * `Grounded in 4 documents`, counted from the answer's own citations.
+   *
+   * Distinct documents rather than citations, so one heavily quoted policy is not
+   * reported as several. Null when nothing was cited, which is the case the
+   * not-found card already covers.
+   */
+  protected readonly grounding = computed(() => {
+    const count = this.message().documentCount;
+
+    if (count === 0) {
+      return null;
+    }
+
+    return `Grounded in ${count} ${count === 1 ? 'document' : 'documents'}`;
+  });
 
   private copyTimer: ReturnType<typeof setTimeout> | undefined;
 

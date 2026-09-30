@@ -105,8 +105,15 @@ export class HistoryItemComponent {
   /** Emits the question id when the row is activated. */
   readonly selected = output<string>();
 
-  /** Initials for the collapsed rail. */
-  protected readonly initials = computed(() => toInitials(this.entry().question.topic));
+  /**
+   * Initials for the collapsed rail.
+   *
+   * Taken from the question itself, because the backend's history rows carry
+   * nothing but the question, its answer and a timestamp. A separate short topic
+   * would have to be invented, and an invented topic in a rail of initials is
+   * worse than an honest one derived from what was asked.
+   */
+  protected readonly initials = computed(() => toInitials(this.entry().question.title));
 
   /** Label, icon and colour for the current answer status. */
   protected readonly status = computed(() => STATUS_META[this.entry().question.answerStatus]);

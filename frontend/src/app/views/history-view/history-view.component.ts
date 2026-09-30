@@ -9,8 +9,12 @@ import { HistoryListComponent } from '../../features/history/components/history-
 import { InputComponent } from '../../shared/components/input/input.component';
 
 /**
- * Every question the user has asked, searchable and grouped by date. Opening an
- * entry routes to its response view.
+ * Every question asked in this session, searchable and grouped by date. Opening
+ * an entry routes to its response view.
+ *
+ * Scoped to the session because that is the only scope the backend exposes:
+ * history is keyed by session id and the session expires, so there is nothing to
+ * list across sessions and the view says so rather than implying otherwise.
  */
 @Component({
   selector: 'app-history-view',
@@ -33,9 +37,9 @@ import { InputComponent } from '../../shared/components/input/input.component';
 
         <app-history-list
           [groups]="history.groups()"
-          [selectedId]="activeSessionId()"
+          [selectedId]="activeTurnId()"
           [emptyMessage]="emptyMessage()"
-          (selected)="openSession($event)"
+          (selected)="openTurn($event)"
         />
       </div>
     </div>
@@ -49,19 +53,28 @@ export class HistoryViewComponent {
   private readonly router = inject(Router);
   private readonly layout = inject(LayoutService);
 
-  /** Id of the open conversation, so its row can be highlighted. */
-  protected readonly activeSessionId = computed(() => this.chat.question()?.id ?? null);
+  /**
+   * Id of the open turn, so its row can be highlighted.
+   *
+   * Resolved from the service rather than read off the route, so the highlight
+   * also lands on the newest row when the view is reached without an id.
+   */
+  protected readonly activeTurnId = computed(() => this.chat.activeTurnId());
 
   /** Explains an empty list, distinguishing "no history" from "no matches". */
-  protected readonly emptyMessage = computed(() =>
-    this.history.hasNoResults()
-      ? 'No questions match your search.'
-      : 'You have not asked any questions yet.',
-  );
+  protected readonly emptyMessage = computed(() => {
+    if (this.history.hasNoResults()) {
+      return 'No questions match your search.';
+    }
 
-  /** Opens a past conversation. */
-  protected openSession(questionId: string): void {
+    return this.history.isLoading()
+      ? 'Loading your questions...'
+      : 'You have not asked any questions in this session yet.';
+  });
+
+  /** Opens a past turn, showing the conversation that led to it. */
+  protected openTurn(turnId: string): void {
     this.layout.closeAfterNavigation();
-    void this.router.navigate(['/response', questionId]);
+    void this.router.navigate(['/response', turnId]);
   }
 }
