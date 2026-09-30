@@ -17,6 +17,7 @@ class Source(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     answered: bool
+    confidence: float = 0.0
     sources: list[Source] = []
 
 
@@ -31,5 +32,6 @@ class HistoryItem(BaseModel):
     question: str
     answer: str
     answered: bool
+    confidence: float = 0.0
     sources: list[Source]
     created_at: datetime

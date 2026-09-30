@@ -39,12 +39,12 @@ class Assistant:
 
     def ask(self, question: str) -> dict:
         if is_personal_question(question):
-            return {"answer": PERSONAL_MSG, "answered": False, "sources": []}
+            return {"answer": PERSONAL_MSG, "answered": False, "confidence": 0.0, "sources": []}
 
         nodes = [n for n in self.retriever.retrieve(question)
                  if (n.score or 0) >= settings.min_score]
         if not nodes:
-            return {"answer": FALLBACK_MSG, "answered": False, "sources": []}
+            return {"answer": FALLBACK_MSG, "answered": False, "confidence": 0.0, "sources": []}
 
         context = "\n\n".join(
             f"({n.metadata['policy_title']} > {n.metadata['section']})\n"
@@ -56,9 +56,9 @@ class Assistant:
         ).text.strip()
 
         if "PERSONAL" == text:
-            return {"answer": PERSONAL_MSG, "answered": False, "sources": []}
+            return {"answer": PERSONAL_MSG, "answered": False, "confidence": 0.0, "sources": []}
         if "NOT_FOUND" in text:
-            return {"answer": FALLBACK_MSG, "answered": False, "sources": []}
+            return {"answer": FALLBACK_MSG, "answered": False, "confidence": 0.0, "sources": []}
 
         sources = [
             {
@@ -69,4 +69,5 @@ class Assistant:
             }
             for n in nodes
         ]
-        return {"answer": text, "answered": True, "sources": sources}
+        confidence = round(sum(float(n.score or 0) for n in nodes) / len(nodes), 3)
+        return {"answer": text, "answered": True, "confidence": confidence, "sources": sources}
