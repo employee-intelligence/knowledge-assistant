@@ -76,7 +76,7 @@ describe('LayoutService', () => {
       expect(layout.mode()).toBe('hidden');
       expect(layout.isSidebarVisible()).toBe(false);
       expect(layout.isRail()).toBe(false);
-      expect(layout.toggleLabel()).toBe('Open menu');
+      expect(layout.toggleLabel()).toBe('Open sidebar');
     });
 
     it('opens as a drawer over the content', () => {
@@ -100,7 +100,7 @@ describe('LayoutService', () => {
       expect(layout.isCompact()).toBe(true);
       expect(layout.mode()).toBe('hidden');
       expect(layout.isSidebarVisible()).toBe(false);
-      expect(layout.toggleLabel()).toBe('Open menu');
+      expect(layout.toggleLabel()).toBe('Open sidebar');
     });
 
     it('opens as a drawer over the content and closes on Escape', () => {

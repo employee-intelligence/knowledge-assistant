@@ -1,6 +1,12 @@
 # Dependencies
 node_modules/
 
+# An accidental nested install. `npm install` run from inside this directory
+# creates frontend/frontend, which shadows this project and holds a second copy
+# of every dependency. It is build residue rather than a second app, so the
+# whole path is ignored rather than just the node_modules inside it.
+/frontend/
+
 # Build output
 dist/
 .angular/
