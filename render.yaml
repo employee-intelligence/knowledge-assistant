@@ -1,0 +1,39 @@
+# Values here mirror backend/.env.example, which mirrors the defaults in
+# backend/app/config.py. Change a setting in one place and carry it to the
+# others, otherwise local and deployed drift apart.
+services:
+  - type: web
+    name: knowledge-assistant-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+
+    envVars:
+      # Set this in the Render dashboard. An absent or revoked key does not stop
+      # the service booting, it only makes /chat fail, so /health reports it.
+      - key: GOOGLE_API_KEY
+        sync: false
+
+      # gemini-2.5-flash is retired for new accounts and now answers 404, which
+      # surfaced only as a 500 from /chat.
+      - key: LLM_MODEL
+        value: gemini-3.8-flash
+
+      # Tried in order when the primary is throttled, before giving up.
+      - key: LLM_FALLBACK_MODELS
+        value: gemini-3.5-flash,gemini-3.7-flash,gemini-flash-latest
+
+      - key: MIN_SCORE
+        value: "0.45"
+
+      # The frontend is served from its own origin, not localhost, so the
+      # previous value locked the deployed app out of the API.
+      - key: ALLOWED_ORIGINS
+        value: "*"
+
+      # Neon, set in the Render dashboard. This service no longer provisions a
+      # database of its own, so local and deployed run against the same Neon
+      # instance and a migration cannot land in only one of them.
+      - key: DATABASE_URL
+        sync: false
