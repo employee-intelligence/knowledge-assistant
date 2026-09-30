@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="bb1493bb-649a-46ab-8c2d-f371f2be0cf9" name="Changes" comment="fix repo push" />
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="ComposerSettings">
+    <execution>
+      <executable />
+    </execution>
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+        <option value="Dockerfile" />
+      </list>
+    </option>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "history": [
+    {
+      "assignee": "aman52kwah"
+    }
+  ],
+  "lastFilter": {
+    "assignee": "aman52kwah"
+  }
+}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/aman52kwah/knowledge-assistant.git",
+    "accountId": "cf3eac1c-92ac-4153-8c9d-9acba40c9b3d"
+  }
+}]]></component>
+  <component name="McpProjectServerCommands">
+    <commands />
+    <urls />
+  </component>
+  <component name="NextEditCompletionFeaturesState">
+    <decayedCancelled>
+      <entry key="MS100" value="1.0007248650247211" />
+      <entry key="MS500" value="1.235539084579571" />
+      <entry key="S2" value="1.7466793136668675" />
+      <entry key="S5" value="2.16716315393852" />
+      <entry key="S10" value="2.4801537408902616" />
+      <entry key="S30" value="2.9651863382037122" />
+      <entry key="S60" value="3.607106749041685" />
+      <entry key="M2" value="4.4089379526997465" />
+      <entry key="M5" value="5.2291822770213745" />
+      <entry key="M10" value="5.587720767192697" />
+      <entry key="M15" value="5.71879134240568" />
+      <entry key="M30" value="5.856115745772072" />
+      <entry key="H1" value="5.927218187655808" />
+      <entry key="H2" value="5.963396657668043" />
+      <entry key="H4" value="5.981644902137288" />
+      <entry key="D1" value="5.996933369531889" />
+      <entry key="W1" value="5.999561727190948" />
+    </decayedCancelled>
+    <decayedSelected>
+      <entry key="MS100" value="0.0" />
+      <entry key="MS500" value="0.0" />
+      <entry key="S2" value="0.0" />
+      <entry key="S5" value="0.0" />
+      <entry key="S10" value="0.0" />
+      <entry key="S30" value="0.0" />
+      <entry key="S60" value="0.0" />
+      <entry key="M2" value="0.0" />
+      <entry key="M5" value="0.0" />
+      <entry key="M10" value="0.0" />
+      <entry key="M15" value="0.0" />
+      <entry key="M30" value="0.0" />
+      <entry key="H1" value="0.0" />
+      <entry key="H2" value="0.0" />
+      <entry key="H4" value="0.0" />
+      <entry key="D1" value="0.0" />
+      <entry key="W1" value="0.0" />
+    </decayedSelected>
+    <decayedShown>
+      <entry key="MS100" value="0.9144847351682608" />
+      <entry key="MS500" value="1.2128284440291337" />
+      <entry key="S2" value="1.7309188156732924" />
+      <entry key="S5" value="2.1441761511721023" />
+      <entry key="S10" value="2.460341619333842" />
+      <entry key="S30" value="2.9550288346464257" />
+      <entry key="S60" value="3.60072638763728" />
+      <entry key="M2" value="4.405054479530109" />
+      <entry key="M5" value="5.22735952734713" />
+      <entry key="M10" value="5.58675159949059" />
+      <entry key="M15" value="5.718131220704434" />
+      <entry key="M30" value="5.855778364275678" />
+      <entry key="H1" value="5.927047605157603" />
+      <entry key="H2" value="5.963310885566248" />
+      <entry key="H4" value="5.9816018948699705" />
+      <entry key="D1" value="5.996926184732587" />
+      <entry key="W1" value="5.999560700375522" />
+    </decayedShown>
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 4,
+  &quot;fromUser&quot;: false
+}</component>
+  <component name="ProjectId" id="3K0FsSJCifoxdXfHpHhQpgcro8C" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.MCP Project settings loaded": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
+    "codeWithMe.voiceChat.enabledByDefault": "false",
+    "git-widget-placeholder": "main",
+    "kotlin-language-version-configured": "true",
+    "last_opened_file_path": "/Users/mike/Documents/amalitechtraining/knowledge-assistant",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.jshint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.jshint": "",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "python.packages.toolwindow.project.migrated.to.right.top.v2": "true"
+  }
+}]]></component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-jdk-30f59d01ecdd-a203e0a19954-intellij.indexing.shared.core-IU-262.10315.125" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="bb1493bb-649a-46ab-8c2d-f371f2be0cf9" name="Changes" comment="" />
+      <created>1790686787263</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1790686787263</updated>
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="fix repo push" />
+    <option name="LAST_COMMIT_MESSAGE" value="fix repo push" />
+  </component>
+</project>
