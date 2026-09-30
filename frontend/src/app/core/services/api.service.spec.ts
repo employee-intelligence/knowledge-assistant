@@ -84,7 +84,11 @@ describe('ApiService', () => {
       http.expectOne(`${API_BASE_URL}/chat`).flush({
         answer: 'You get twenty days.',
         answered: true,
-        sources: [SOURCE, { ...SOURCE, section: 'Section 9' }, { ...SOURCE, document: 'Staff Handbook' }],
+        sources: [
+          SOURCE,
+          { ...SOURCE, section: 'Section 9' },
+          { ...SOURCE, document: 'Staff Handbook' },
+        ],
       });
 
       expect(answer?.text).toBe('You get twenty days.');
@@ -118,7 +122,9 @@ describe('ApiService', () => {
 
       api.ask('sess-1234', 'Office plant policy?').subscribe((value) => (answer = value));
 
-      http.expectOne(`${API_BASE_URL}/chat`).flush({ answer: 'No mention of that.', answered: false, sources: [] });
+      http
+        .expectOne(`${API_BASE_URL}/chat`)
+        .flush({ answer: 'No mention of that.', answered: false, sources: [] });
 
       expect(answer?.status).toBe('not-found');
     });
@@ -143,11 +149,28 @@ describe('ApiService', () => {
       // The backend sends no timezone designator, so an unadorned string has to
       // be read as UTC. Read as local time it would move a turn across a day
       // boundary and land it in the wrong history heading.
+      //
+      // Flushed newest first, which is the order the endpoint returns: a session
+      // is listed with the most recent question at the top for the user to read.
       http.expectOne(`${API_BASE_URL}/history/sess-1234`).flush([
-        { question: 'First?', answer: 'Yes.', answered: true, sources: [], created_at: '2026-09-30T08:00:00' },
-        { question: 'Second?', answer: 'No.', answered: false, sources: [], created_at: '2026-09-30T09:00:00Z' },
+        {
+          question: 'Second?',
+          answer: 'No.',
+          answered: false,
+          sources: [],
+          created_at: '2026-09-30T09:00:00Z',
+        },
+        {
+          question: 'First?',
+          answer: 'Yes.',
+          answered: true,
+          sources: [],
+          created_at: '2026-09-30T08:00:00',
+        },
       ]);
 
+      // Reversed into conversation order, with id 0 still the oldest turn.
+      expect(turns.map((turn) => turn.question)).toEqual(['First?', 'Second?']);
       expect(turns.map((turn) => turn.id)).toEqual(['0', '1']);
       expect(turns[0].status).toBe('answered');
       expect(turns[1].status).toBe('not-found');
@@ -178,7 +201,9 @@ describe('ApiService', () => {
 
       api.getHistory('gone').subscribe({ error: (value) => (error = value) });
 
-      http.expectOne(`${API_BASE_URL}/history/gone`).flush('Not Found', { status: 404, statusText: 'Not Found' });
+      http
+        .expectOne(`${API_BASE_URL}/history/gone`)
+        .flush('Not Found', { status: 404, statusText: 'Not Found' });
 
       expect((error as ApiError).isTransient).toBe(false);
       expect((error as ApiError).status).toBe(404);
@@ -227,7 +252,9 @@ describe('ApiService', () => {
 
     api.ask('sess-1234', 'Leave?').subscribe({ error: () => (calls += 1) });
 
-    http.expectOne(`${API_BASE_URL}/chat`).flush('boom', { status: 500, statusText: 'Server Error' });
+    http
+      .expectOne(`${API_BASE_URL}/chat`)
+      .flush('boom', { status: 500, statusText: 'Server Error' });
 
     expect(calls).toBe(1);
     http.expectNone(`${API_BASE_URL}/chat`);
@@ -240,6 +267,6 @@ function toAnswerShape(): { text: string; status: string; sources: unknown[] } {
 }
 
 /** Shape of a mapped turn, for the assertions above. */
-function toTurnShape(): { id: string; status: string; createdAt: string }[] {
+function toTurnShape(): { id: string; question: string; status: string; createdAt: string }[] {
   return [];
 }

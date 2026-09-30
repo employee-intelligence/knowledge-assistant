@@ -43,6 +43,9 @@ export class ChatService {
   /** True while the session's turns have not arrived yet. */
   readonly isResolving = computed(() => !this.history.isLoaded());
 
+  /** True when the conversation's session is gone and its history with it. */
+  readonly sessionExpired = this.session.sessionExpired;
+
   /** The open turn, or undefined when the requested id is not one of this session's. */
   readonly activeTurn = computed<Turn | undefined>(() => {
     const turns = this.history.turns();
@@ -81,6 +84,15 @@ export class ChatService {
 
   /** True once the open turn has something to render. */
   readonly hasMessages = computed(() => this.activeTurn() !== undefined);
+
+  /**
+   * True when the conversation is loaded and holds no questions at all.
+   *
+   * Distinct from having no open turn. A session with nothing in it is a
+   * conversation waiting for its first question, which is where a reload on a new
+   * session lands and what the view used to misreport as a missing question.
+   */
+  readonly isEmpty = computed(() => this.history.isLoaded() && this.history.turns().length === 0);
 
   /**
    * Asks a question.
@@ -134,7 +146,10 @@ export class ChatService {
     this.history.markTurnPending(turnId);
 
     this.dispatch(turnId, turn.question)
-      .pipe(finalize(() => this.askingState.set(false)), takeUntilDestroyed(this.destroyRef))
+      .pipe(
+        finalize(() => this.askingState.set(false)),
+        takeUntilDestroyed(this.destroyRef),
+      )
       .subscribe();
   }
 
@@ -146,9 +161,29 @@ export class ChatService {
     this.requestedTurnIdState.set(turnId);
   }
 
-  /** Stops following a specific turn, so the view returns to the newest one. */
+  /**
+   * Stops following one turn, so the view returns to the newest one.
+   *
+   * This is only about which turn is open. It deliberately keeps the session and
+   * the turns, so returning from an older turn does not throw the conversation
+   * away.
+   */
+  stopFollowing(): void {
+    this.requestedTurnIdState.set(null);
+  }
+
+  /**
+   * Starts a new conversation.
+   *
+   * This retires the session rather than only pointing the view back at the start
+   * of the thread. The backend scopes history to a session id, so keeping it would
+   * list the previous conversation's questions in the sidebar of what is meant to
+   * be an empty one, and the next question would be filed beside them.
+   */
   startNewConversation(): void {
     this.requestedTurnIdState.set(null);
+    this.session.startNew();
+    this.history.clear();
   }
 
   /**
@@ -158,6 +193,12 @@ export class ChatService {
    * searching forever and the user has something to retry from. The turn exists
    * before the session is resolved for the same reason: a session that cannot be
    * created still leaves the question on screen with an explanation.
+   *
+   * A session the backend will not accept is the exception. The question was never
+   * asked, so a failed-answer card on the turn would be a lie, and every turn
+   * beside it was filed under the same dead id. The turns go and the expiry takes
+   * over the view, which is the one screen that can tell the user what happened and
+   * offer to start again.
    */
   private dispatch(turnId: string, question: string): Observable<null> {
     this.askingState.set(true);
@@ -171,6 +212,13 @@ export class ChatService {
       }),
       catchError((error: unknown) => {
         this.session.handleSessionLoss(error);
+
+        if (this.session.sessionExpired()) {
+          this.history.clear();
+
+          return of(null);
+        }
+
         this.history.failTurn(turnId, this.describeFailure(error));
 
         return of(null);
@@ -189,9 +237,7 @@ export class ChatService {
       createdAt: turn.createdAt,
       status: turn.status,
       sources: isUser ? [] : turn.sources,
-      documentCount: isUser
-        ? 0
-        : new Set(turn.sources.map((source) => source.document)).size,
+      documentCount: isUser ? 0 : new Set(turn.sources.map((source) => source.document)).size,
     };
   }
 

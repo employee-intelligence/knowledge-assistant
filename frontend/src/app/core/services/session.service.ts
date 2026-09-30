@@ -3,7 +3,7 @@ import { DestroyRef, Injectable, PLATFORM_ID, inject, signal } from '@angular/co
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Observable, map, of, shareReplay, tap } from 'rxjs';
 
-import { SESSION_EXPIRY_MARGIN_MS, SESSION_STORAGE_KEY } from '../api.config';
+import { SESSION_STORAGE_KEY } from '../api.config';
 import { SessionCreateResponse, parseUtcTimestamp } from '../models/api.model';
 import { ApiError, ApiService } from './api.service';
 
@@ -33,12 +33,23 @@ export class SessionService {
 
   private readonly sessionIdState = signal<string | null>(null);
   private readonly expiresAtState = signal<number | null>(null);
+  private readonly expiredState = signal(false);
 
   /** In-flight creation, shared so concurrent callers get the same session. */
   private pending: Observable<string> | null = null;
 
   /** The open session's id, or null before one exists. */
   readonly sessionId = this.sessionIdState.asReadonly();
+
+  /**
+   * True when a session this browser was using is gone and its history with it.
+   *
+   * Kept as its own signal rather than inferred from a missing id, because "no
+   * session yet" and "the session expired" call for different things on screen:
+   * the first is a new conversation waiting for a question, the second is an
+   * explanation the user needs before they can ask again.
+   */
+  readonly sessionExpired = this.expiredState.asReadonly();
 
   constructor() {
     if (this.isBrowser) {
@@ -47,13 +58,18 @@ export class SessionService {
   }
 
   /**
-   * The current session id, opening a new session if there is none or the stored
-   * one is too close to expiry to rely on.
+   * The current session id, creating one only when there is genuinely none.
+   *
+   * A session is kept for the life of the conversation and is not swapped out
+   * because it is approaching expiry. Retiring one early would silently move the
+   * conversation to a new session, and the history it had, which the backend
+   * scopes by session id, would disappear mid-thread. Instead the session is used
+   * until the backend rejects it, and that rejection is reported as an expiry.
    */
   ensureSession(): Observable<string> {
     const current = this.sessionIdState();
 
-    if (current && !this.isExpiringSoon()) {
+    if (current) {
       return of(current);
     }
 
@@ -74,34 +90,54 @@ export class SessionService {
   }
 
   /**
-   * Reports that the backend no longer recognises the session, so the next ask
-   * opens a fresh one instead of posting into a session whose history is gone.
+   * Starts a new conversation.
+   *
+   * The current session is retired so the next question opens a fresh one, which
+   * is what makes "New Conversation" mean a clean thread rather than the same
+   * session with the view pointed back at its first turn. The expiry notice is
+   * cleared with it, so a new conversation is not born showing a warning about
+   * the session it just replaced.
+   */
+  startNew(): void {
+    this.expiredState.set(false);
+    this.clear();
+  }
+
+  /**
+   * Reports that the backend no longer recognises the session.
+   *
+   * Only a rejection counts. A session that is merely close to expiry is still
+   * usable, and treating it as lost would throw away a conversation that was
+   * about to work. A 5xx or a timeout says nothing about the session and leaves
+   * it open, so the failed question stays worth retrying against it.
    */
   handleSessionLoss(error: unknown): void {
-    if (error instanceof ApiError && error.status === 404) {
-      this.clear();
+    if (error instanceof ApiError && error.isSessionLost) {
+      this.expire();
     }
   }
 
-  /** True once a session exists and the backend will still accept requests for it. */
-  get isUsable(): boolean {
-    return this.sessionIdState() !== null && !this.isExpiringSoon();
+  /**
+   * Retires a session the backend has dropped.
+   *
+   * The stored copy goes with it, so a reload starts a clean conversation rather
+   * than trying the same dead id again.
+   */
+  private expire(): void {
+    this.expiredState.set(true);
+    this.clear();
   }
 
   /** Stores a freshly created session and returns its id. */
   private adopt(response: SessionCreateResponse): string {
     const expiresAt = new Date(parseUtcTimestamp(response.expires_at)).getTime();
 
+    this.expiredState.set(false);
     this.sessionIdState.set(response.session_id);
     this.expiresAtState.set(expiresAt);
     this.persist({ id: response.session_id, expiresAt });
 
     return response.session_id;
-  }
-
-  /** Retires the current session so the next ensure opens another one. */
-  reset(): void {
-    this.clear();
   }
 
   /** Drops the session and its stored copy. */
@@ -121,14 +157,15 @@ export class SessionService {
     }
   }
 
-  /** True when the session is gone or close enough to expiry to be unreliable. */
-  private isExpiringSoon(): boolean {
-    const expiresAt = this.expiresAtState();
-
-    return expiresAt === null || expiresAt - SESSION_EXPIRY_MARGIN_MS <= Date.now();
-  }
-
-  /** Rehydrates the session from storage, discarding one that is already stale. */
+  /**
+   * Rehydrates the session from storage, discarding one that is already stale.
+   *
+   * A stored session past its expiry is reported as expired rather than dropped
+   * in silence: the backend deletes an expired session, so the conversation this
+   * browser remembers is genuinely gone and the user is told why it is empty
+   * instead of being shown a "question not found" page for a question they can
+   * see the title of in the sidebar.
+   */
   private restore(): void {
     let stored: StoredSession | null = null;
 
@@ -140,8 +177,13 @@ export class SessionService {
       return;
     }
 
-    if (!stored?.id || stored.expiresAt - SESSION_EXPIRY_MARGIN_MS <= Date.now()) {
+    if (!stored?.id) {
       this.clear();
+      return;
+    }
+
+    if (stored.expiresAt <= Date.now()) {
+      this.expire();
       return;
     }
 
