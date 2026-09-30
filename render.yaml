@@ -17,7 +17,7 @@ services:
         value: "0.45"
 
       - key: ALLOWED_ORIGINS
-        value: "*"
+        value: "http://localhost:4200"
 
       - key: DATABASE_URL
         fromDatabase:
