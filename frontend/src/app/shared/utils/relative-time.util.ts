@@ -39,6 +39,18 @@ export function formatRelativeTime(isoDate: string, now: number = Date.now()): s
     return `${days} day${days === 1 ? '' : 's'} ago`;
   }
 
+  return formatAbsoluteDate(isoDate);
+}
+
+/**
+ * A timestamp as a calendar date: "20 Sep 2026".
+ *
+ * Used where the exact day is the point rather than the age, such as when a
+ * document was uploaded. A relative time would be wrong there: the inventory is
+ * ordered by recency, and "3 days ago" on every row in a list sorted newest first
+ * says less than the date does.
+ */
+export function formatAbsoluteDate(isoDate: string): string {
   return new Date(isoDate).toLocaleDateString(undefined, {
     day: 'numeric',
     month: 'short',

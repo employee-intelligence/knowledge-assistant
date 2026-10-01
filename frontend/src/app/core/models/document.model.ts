@@ -9,6 +9,8 @@ export interface PolicyDocument {
   status: DocumentStatus;
   sizeLabel: string;
   sectionCount: number;
+  /** When the file arrived, which is not the same as when it was last touched. */
+  uploadedAt: string;
   updatedAt: string;
   updatedBy: string;
 }
