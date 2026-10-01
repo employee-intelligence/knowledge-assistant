@@ -1,19 +1,20 @@
 /**
- * Single source for the backend base URL. Every HTTP call is built from this
+ * Single source for the backend origin. Every HTTP call is built from this
  * constant, so pointing the app at a different deployment is a one-line change.
  *
  * The backend serves CORS with a wildcard origin, so the browser calls it
  * directly and no dev-server proxy is involved.
  *
- * Pointed at a locally running backend for now. Start it with
- * `uvicorn app.main:app --reload` from `backend/`.
+ * The deployed backend. Paths are appended by `ApiService`, which builds them
+ * from this origin, so the `/api` prefix that the conversation routes live under
+ * is not part of it.
  */
-export const API_BASE_URL = 'http://localhost:8000';
+export const API_BASE_URL = 'https://knowledge-assistant-backend-45ob.onrender.com';
 
-// The deployed backend. Kept here so restoring it is a matter of swapping the two
-// lines, and not of finding the URL again. It does not serve `/chat/stream` yet,
-// which is why the app is talking to localhost.
-// export const API_BASE_URL = 'https://knowledge-assistant-backend-88gw.onrender.com';
+// A locally running backend, for working on the two halves together. Start it
+// with `uvicorn app.main:app --reload` from `backend/`. Note that the origin
+// carries no trailing slash, because the paths are concatenated onto it.
+// export const API_BASE_URL = 'http://localhost:8000';
 
 /**
  * How long a single request may take before it is abandoned.
