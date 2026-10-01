@@ -23,7 +23,7 @@ const FOCUSABLE_SELECTOR =
  * conversation list, so the sidebar and the offset it causes are dropped there
  * rather than covered up.
  */
-const PLAIN_ROUTES = ['/login', '/accept-invite'];
+const PLAIN_ROUTES = ['/login', '/register', '/accept-invite'];
 
 /**
  * The application shell: the sidebar, the dismissible backdrop, and the routed
