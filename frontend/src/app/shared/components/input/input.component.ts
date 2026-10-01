@@ -31,7 +31,7 @@ const TONE_CLASSES: Record<InputTone, { field: string; text: string; icon: strin
   host: { class: 'block' },
   template: `
     <label
-      class="flex items-center gap-2 rounded-md px-3 py-2 transition-colors
+      class="flex h-9 items-center gap-2 rounded-md px-3 transition-colors
         has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2
         has-[:focus-visible]:outline-primary"
       [class]="fieldClasses()"
@@ -52,8 +52,7 @@ const TONE_CLASSES: Record<InputTone, { field: string; text: string; icon: strin
           type="button"
           variant="ghost"
           [tone]="tone() === 'sidebar' ? 'dark' : 'light'"
-          size="icon"
-          class="size-6"
+          size="icon-sm"
           (click)="clear()"
         >
           <app-icon name="x" [size]="13" label="Clear search" />
