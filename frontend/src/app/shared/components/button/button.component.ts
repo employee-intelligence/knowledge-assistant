@@ -4,7 +4,7 @@ import { ChangeDetectionStrategy, Component, computed, input } from '@angular/co
 export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'subtle';
 
 /** Physical size of a button. */
-export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg' | 'icon' | 'rail';
+export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg' | 'icon' | 'icon-sm' | 'rail';
 
 /** Surface the button sits on, which decides its resting and hover colour. */
 export type ButtonTone = 'light' | 'brand' | 'dark';
@@ -41,6 +41,10 @@ const SIZE_CLASSES: Record<ButtonSize, string> = {
   md: 'gap-2 px-3 py-2 text-sm',
   lg: 'gap-2 px-4 py-2.5 text-sm',
   icon: 'size-10',
+  // A compact square for a control that sits inside another field, such as the
+  // clear button on a search box, where the default icon size is taller than the
+  // field and stretches it when the control appears.
+  'icon-sm': 'size-6',
   rail: 'size-11',
 };
 
@@ -51,6 +55,7 @@ const RADIUS_CLASSES: Record<ButtonSize, string> = {
   md: 'rounded-md',
   lg: 'rounded-md',
   icon: 'rounded-md',
+  'icon-sm': 'rounded-md',
   rail: 'rounded-md',
 };
 
