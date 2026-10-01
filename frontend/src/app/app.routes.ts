@@ -9,8 +9,29 @@ import { Routes } from '@angular/router';
  * so the link keeps working however long afterwards it is followed. The bare
  * `response` route follows the conversation that was last active, which is where
  * a question sent from the dashboard lands.
+ *
+ * The signed-out screens are listed first: they are the only routes that render
+ * without the sidebar, which the shell decides from the path.
  */
 export const routes: Routes = [
+  {
+    path: 'login',
+    pathMatch: 'full',
+    title: 'Sign in · Internal Knowledge Assistant',
+    loadComponent: () =>
+      import('./features/auth/views/login-view/login-view.component').then(
+        (module) => module.LoginViewComponent,
+      ),
+  },
+  {
+    path: 'accept-invite',
+    pathMatch: 'full',
+    title: 'Set your password · Internal Knowledge Assistant',
+    loadComponent: () =>
+      import('./features/auth/views/accept-invite-view/accept-invite-view.component').then(
+        (module) => module.AcceptInviteViewComponent,
+      ),
+  },
   {
     path: '',
     pathMatch: 'full',
@@ -51,7 +72,40 @@ export const routes: Routes = [
       ),
   },
   {
+    path: 'admin',
+    pathMatch: 'full',
+    title: 'Administration · Internal Knowledge Assistant',
+    loadComponent: () =>
+      import('./views/admin-dashboard-view/admin-dashboard-view.component').then(
+        (module) => module.AdminDashboardViewComponent,
+      ),
+  },
+  {
+    path: 'admin/documents',
+    title: 'Documents · Internal Knowledge Assistant',
+    loadComponent: () =>
+      import('./views/admin-documents-view/admin-documents-view.component').then(
+        (module) => module.AdminDocumentsViewComponent,
+      ),
+  },
+  {
+    path: 'admin/questions',
+    title: 'Question logs · Internal Knowledge Assistant',
+    loadComponent: () =>
+      import('./views/admin-question-logs-view/admin-question-logs-view.component').then(
+        (module) => module.AdminQuestionLogsViewComponent,
+      ),
+  },
+  {
+    path: 'not-found',
+    title: 'Page not found · Internal Knowledge Assistant',
+    loadComponent: () =>
+      import('./views/not-found-view/not-found-view.component').then(
+        (module) => module.NotFoundViewComponent,
+      ),
+  },
+  {
     path: '**',
-    redirectTo: '',
+    redirectTo: 'not-found',
   },
 ];

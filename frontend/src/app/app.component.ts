@@ -7,7 +7,9 @@ import {
   inject,
   viewChild,
 } from '@angular/core';
-import { RouterOutlet } from '@angular/router';
+import { toSignal } from '@angular/core/rxjs-interop';
+import { Router, RouterOutlet } from '@angular/router';
+import { map, startWith } from 'rxjs';
 
 import { ChatSidebarComponent } from './features/chat/components/chat-sidebar/chat-sidebar.component';
 import { LayoutService } from './core/services/layout.service';
@@ -15,6 +17,13 @@ import { LayoutService } from './core/services/layout.service';
 /** Elements that can hold focus, used by the drawer's focus trap. */
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Routes that own the whole screen. Signing in has nothing to do with a
+ * conversation list, so the sidebar and the offset it causes are dropped there
+ * rather than covered up.
+ */
+const PLAIN_ROUTES = ['/login', '/accept-invite'];
 
 /**
  * The application shell: the sidebar, the dismissible backdrop, and the routed
@@ -50,6 +59,7 @@ const FOCUSABLE_SELECTOR =
           transition-opacity duration-shell ease-out-soft motion-reduce:transition-none"
         [class.opacity-0]="!layout.isBackdropVisible()"
         [class.pointer-events-none]="!layout.isBackdropVisible()"
+        [class.hidden]="isPlain()"
         [inert]="!layout.isBackdropVisible()"
         aria-label="Close sidebar"
         (click)="layout.closeSidebar()"
@@ -64,6 +74,7 @@ const FOCUSABLE_SELECTOR =
         [class.w-sidebar]="!layout.isRail()"
         [class.w-rail]="layout.isRail()"
         [class.-translate-x-full]="layout.mode() === 'hidden'"
+        [class.hidden]="isPlain()"
         [inert]="layout.mode() === 'hidden'"
       >
         <app-chat-sidebar />
@@ -72,9 +83,10 @@ const FOCUSABLE_SELECTOR =
       <main
         id="app-main"
         class="flex min-h-0 min-w-0 flex-1 flex-col transition-[padding] duration-shell
-          ease-out-soft motion-reduce:transition-none lg:pl-rail"
-        [class.lg:pl-sidebar]="!layout.isRail()"
-        [class.lg:pl-rail]="layout.isRail()"
+          ease-out-soft motion-reduce:transition-none"
+        [class.lg:pl-sidebar]="!layout.isRail() && !isPlain()"
+        [class.lg:pl-rail]="layout.isRail() && !isPlain()"
+        [class.lg:pl-0]="isPlain()"
       >
         <router-outlet />
       </main>
@@ -84,6 +96,21 @@ const FOCUSABLE_SELECTOR =
 export class AppComponent {
   /** Responsive shell state: breakpoints, collapse preference and drawer. */
   protected readonly layout = inject(LayoutService);
+
+  private readonly router = inject(Router);
+
+  /**
+   * Whether the routed view stands on its own. Tracked from the router rather
+   * than from route data so a plain screen can be reached directly, and a deep
+   * link renders correctly on the first paint.
+   */
+  protected readonly isPlain = toSignal(
+    this.router.events.pipe(
+      map(() => PLAIN_ROUTES.includes(this.router.url)),
+      startWith(PLAIN_ROUTES.includes(this.router.url)),
+    ),
+    { initialValue: false },
+  );
 
   /**
    * The drawer element.
@@ -97,7 +124,9 @@ export class AppComponent {
   private readonly sidebar = viewChild.required<ElementRef<HTMLElement>>('sidebar');
 
   /** True while the sidebar covers the content and should trap focus. */
-  private readonly isDrawerModal = computed(() => this.layout.isBackdropVisible());
+  private readonly isDrawerModal = computed(
+    () => !this.isPlain() && this.layout.isBackdropVisible(),
+  );
 
   /** Where focus came from when the drawer opened, to give it back on close. */
   private focusBeforeDrawer: HTMLElement | null = null;
