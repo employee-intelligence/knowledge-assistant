@@ -56,7 +56,10 @@ services:
         value: "0.40"
 
       # The frontend is served from its own origin, not localhost, so the
-      # previous value locked the deployed app out of the API.
+      # previous value locked the deployed app out of the API. A wildcard is safe
+      # while the API only serves public document data and requires no cookie
+      # session. If a cookie session is added, this becomes the frontend's exact
+      # origin: `https://knowledge-assistant-web.onrender.com`.
       - key: ALLOWED_ORIGINS
         value: "*"
 
@@ -70,7 +73,11 @@ services:
   # host: `ng build` emits both the browser bundle and the Express server that
   # renders the first paint.
   - type: web
-    name: knowledge-assistant-frontend
+    # Not "knowledge-assistant-frontend": that name is already taken on Render by
+    # an unrelated Vite app, and a blueprint cannot claim a name in use. This gives
+    # https://knowledge-assistant-web.onrender.com instead. The name is also the
+    # hostname, so changing it after the first deploy means a new URL.
+    name: knowledge-assistant-web
     runtime: node
     plan: free
     branch: develop
