@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 
 /** Visual weight of a button. */
-export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'subtle';
+export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'subtle' | 'danger';
 
 /** Physical size of a button. */
 export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg' | 'icon' | 'icon-sm' | 'rail';
@@ -20,6 +20,8 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   outline: 'border border-border bg-card',
   ghost: '',
   subtle: 'border border-primary/25 bg-card text-primary hover:bg-secondary-soft',
+  // Reserved for an action that cannot be undone, such as deleting a document.
+  danger: 'bg-danger text-white hover:bg-danger/90 active:bg-danger',
 };
 
 /** Text and hover colour for the variants that have no fill of their own. */
