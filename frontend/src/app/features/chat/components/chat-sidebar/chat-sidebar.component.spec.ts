@@ -62,8 +62,8 @@ describe('ChatSidebarComponent', () => {
     viewer.setPreviewRole('administrator');
     await render();
 
-    expect(element().textContent).toContain('Ama Mensah');
-    expect(element().textContent).toContain('Administrator');
+    expect(element().textContent).toContain('Ama Konadu');
+    expect(element().textContent).toContain('HR Administrator');
   });
 
   it('asks for confirmation before signing out, then returns to the sign-in screen', async () => {

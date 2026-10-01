@@ -35,8 +35,9 @@ export const MOCK_DOCUMENTS: PolicyDocument[] = [
     status: 'indexed',
     sizeLabel: '2.4 MB',
     sectionCount: 18,
+    uploadedAt: ago(12, 0),
     updatedAt: ago(2, 3),
-    updatedBy: 'Ama Mensah',
+    updatedBy: 'Ama Konadu',
   },
   {
     id: 'doc-leave',
@@ -45,6 +46,7 @@ export const MOCK_DOCUMENTS: PolicyDocument[] = [
     status: 'indexed',
     sizeLabel: '860 KB',
     sectionCount: 9,
+    uploadedAt: ago(16, 0),
     updatedAt: ago(4),
     updatedBy: 'Kwame Osei',
   },
@@ -55,8 +57,9 @@ export const MOCK_DOCUMENTS: PolicyDocument[] = [
     status: 'processing',
     sizeLabel: '540 KB',
     sectionCount: 6,
+    uploadedAt: ago(21, 0),
     updatedAt: ago(0, 2),
-    updatedBy: 'Ama Mensah',
+    updatedBy: 'Ama Konadu',
   },
   {
     id: 'doc-it',
@@ -65,6 +68,7 @@ export const MOCK_DOCUMENTS: PolicyDocument[] = [
     status: 'indexed',
     sizeLabel: '1.1 MB',
     sectionCount: 12,
+    uploadedAt: ago(25, 0),
     updatedAt: ago(9),
     updatedBy: 'Yaw Boateng',
   },
@@ -75,6 +79,7 @@ export const MOCK_DOCUMENTS: PolicyDocument[] = [
     status: 'indexed',
     sizeLabel: '1.8 MB',
     sectionCount: 21,
+    uploadedAt: ago(31, 0),
     updatedAt: ago(14),
     updatedBy: 'Efua Danso',
   },
@@ -85,6 +90,7 @@ export const MOCK_DOCUMENTS: PolicyDocument[] = [
     status: 'failed',
     sizeLabel: '720 KB',
     sectionCount: 0,
+    uploadedAt: ago(40, 0),
     updatedAt: ago(1, 5),
     updatedBy: 'Kwame Osei',
   },
@@ -95,8 +101,9 @@ export const MOCK_DOCUMENTS: PolicyDocument[] = [
     status: 'indexed',
     sizeLabel: '310 KB',
     sectionCount: 5,
+    uploadedAt: ago(58, 0),
     updatedAt: ago(21),
-    updatedBy: 'Ama Mensah',
+    updatedBy: 'Ama Konadu',
   },
 ];
 
@@ -105,8 +112,8 @@ export const MOCK_QUESTION_LOGS: QuestionLog[] = [
   {
     id: 'q-1042',
     question: 'How many annual leave days do I get?',
-    askedBy: 'Ama Mensah',
-    askedByInitials: 'AM',
+    askedBy: 'Ama Konadu',
+    askedByInitials: 'AK',
     createdAt: ago(0, 1),
     outcome: 'answered',
     answer:
@@ -197,8 +204,8 @@ export const MOCK_QUESTION_LOGS: QuestionLog[] = [
   {
     id: 'q-1038',
     question: 'When does the performance review cycle run?',
-    askedBy: 'Ama Mensah',
-    askedByInitials: 'AM',
+    askedBy: 'Ama Konadu',
+    askedByInitials: 'AK',
     createdAt: ago(2, 1),
     outcome: 'answered',
     answer:
@@ -275,7 +282,7 @@ export const MOCK_ADMIN_ACTIVITY: AdminActivity[] = [
   {
     id: 'act-1',
     summary: 'uploaded Remote Work Policy',
-    actor: 'Ama Mensah',
+    actor: 'Ama Konadu',
     createdAt: ago(0, 2),
   },
   {
