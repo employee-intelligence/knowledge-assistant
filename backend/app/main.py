@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -68,7 +68,7 @@ def documents():
 def register(user_data: UserCreate, db: Session = Depends(get_db)):
     existing = db.scalar(select(User).where(User.email == user_data.email))
     if existing:
-        return {"detail": "Email already registered"}, 400
+        raise HTTPException(status_code=400, detail="Email already registered")
     user = User(
         id=uuid4().hex,
         email=user_data.email,
@@ -85,9 +85,9 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
 def login(credentials: UserLogin, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == credentials.email))
     if not user or not verify_password(credentials.password, user.hashed_password):
-        return {"detail": "Invalid email or password"}, 401
+        raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
-        return {"detail": "Account is deactivated"}, 403
+        raise HTTPException(status_code=403, detail="Account is deactivated")
     token = create_access_token(user.id, user.role)
     return TokenResponse(access_token=token, expires_in=86400)
 
@@ -155,10 +155,10 @@ def update_user_role(
 ):
     target = db.get(User, user_id)
     if not target:
-        return {"detail": "User not found"}, 404
+        raise HTTPException(status_code=404, detail="User not found")
     new_role = role_data.get("role")
     if new_role not in ("admin", "staff", "intern"):
-        return {"detail": "Invalid role"}, 400
+        raise HTTPException(status_code=400, detail="Invalid role")
     target.role = new_role
     db.commit()
     db.refresh(target)
@@ -173,7 +173,7 @@ def deactivate_user(
 ):
     target = db.get(User, user_id)
     if not target:
-        return {"detail": "User not found"}, 404
+        raise HTTPException(status_code=404, detail="User not found")
     target.is_active = False
     db.commit()
     return {"detail": "User deactivated"}
