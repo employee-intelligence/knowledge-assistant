@@ -67,7 +67,7 @@ describe('LoginViewComponent', () => {
     await render();
 
     const forgot = Array.from(element().querySelectorAll<HTMLButtonElement>('button')).find(
-      (button) => button.textContent?.trim() === 'Forgot your password?',
+      (button) => button.textContent?.trim() === 'Forgot password?',
     ) as HTMLButtonElement;
     forgot.click();
     await render();

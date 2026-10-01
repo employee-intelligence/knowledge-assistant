@@ -14,6 +14,15 @@ import { IconComponent } from '../../../../shared/components/icon/icon.component
 import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.component';
 
 /**
+ * Key the remembered work email is kept under.
+ *
+ * "Remember me" cannot remember a session while there is no session to remember,
+ * so it remembers the address and leaves the password alone. Storing a password
+ * to avoid typing it again would be the wrong trade even when there is one.
+ */
+const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
+
+/**
  * The signed-out landing screen. It collects an email and a password and then
  * says plainly that accounts are not connected, rather than pretending to sign
  * anybody in.
@@ -60,13 +69,23 @@ import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.co
           (valueChange)="password.set($event)"
         />
 
-        <div class="flex items-center justify-end">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <label class="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              class="size-3.5 cursor-pointer accent-primary"
+              [checked]="rememberMe()"
+              (change)="onRememberMe($event)"
+            />
+            <span>Remember me</span>
+          </label>
+
           <button
             type="button"
             class="cursor-pointer text-xs font-medium text-primary hover:underline"
             (click)="onForgotPassword()"
           >
-            Forgot your password?
+            Forgot password?
           </button>
         </div>
 
@@ -96,11 +115,18 @@ import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.co
         </p>
       }
 
-      <p class="mt-6 border-t border-border pt-4 text-center text-sm text-muted-foreground">
-        Have an invitation?
-        <a routerLink="/accept-invite" class="font-medium text-primary hover:underline"
-          >Set your password</a
-        >
+      <p class="mt-6 flex flex-col items-center gap-2 border-t border-border pt-4 text-center
+        text-sm text-muted-foreground">
+        <span>
+          Don't have an account?
+          <a routerLink="/register" class="font-medium text-primary hover:underline"
+            >Create one</a
+          >
+        </span>
+
+        <a routerLink="/accept-invite" class="text-xs text-muted-foreground hover:underline">
+          Have an invitation? Set your password
+        </a>
       </p>
     </app-auth-layout>
   `,
@@ -111,6 +137,9 @@ export class LoginViewComponent {
 
   /** Password as typed. */
   protected readonly password = signal('');
+
+  /** Whether the address should be remembered for next time. */
+  protected readonly rememberMe = signal(false);
 
   /** Whether the form has been sent, which is when fields start complaining. */
   private readonly submitted = signal(false);
@@ -138,6 +167,22 @@ export class LoginViewComponent {
 
   constructor() {
     this.destroyRef.onDestroy(() => clearTimeout(this.pending));
+
+    // Fill the address if it was remembered last time. "Remember me" exists only
+    // because it is on the design, and doing nothing with it would be a dead
+    // control. Since there is no session, the thing that is safe to remember is
+    // the email, and nothing else.
+    try {
+      const remembered = localStorage.getItem(REMEMBERED_EMAIL_KEY);
+      if (remembered && remembered.includes('@')) {
+        this.email.set(remembered);
+        this.rememberMe.set(true);
+      }
+    } catch {
+      // Storage may be unavailable during rendering in some environments, in
+      // which case the best course is to ignore the request to remember and leave
+      // the form as it is.
+    }
   }
 
   /**
@@ -163,5 +208,28 @@ export class LoginViewComponent {
   /** Reports that password recovery has not been built yet. */
   protected onForgotPassword(): void {
     this.notice.set('Password recovery is not connected yet.');
+  }
+
+  /**
+   * Records or forgets the address as the box is ticked.
+   *
+   * Applied on change rather than on submit so un-ticking takes effect at once:
+   * the point of un-ticking the box is to stop being remembered, and holding the
+   * address until the next sign-in attempt would keep it longer than asked.
+   */
+  protected onRememberMe(event: Event): void {
+    this.rememberMe.set((event.target as HTMLInputElement).checked);
+
+    try {
+      if (this.rememberMe()) {
+        localStorage.setItem(REMEMBERED_EMAIL_KEY, this.email().trim());
+      } else {
+        localStorage.removeItem(REMEMBERED_EMAIL_KEY);
+      }
+    } catch {
+      // Nothing useful to say here. The sign-in attempt itself is what the user
+      // came for, and failing to remember an address is not worth an error over
+      // it.
+    }
   }
 }
