@@ -35,8 +35,12 @@
               "allowedHosts": [
                 "localhost",
                 "127.0.0.1",
+<<<<<<< HEAD
                 "knowledge-assistant-frontend-vnx8.onrender.com",
                 "knowledge-assistant-frontend-develop.onrender.com"
+=======
+                "*.onrender.com"
+>>>>>>> a848f639f9ba6b2961dc652c31a94f557cf67430
               ]
             },
             "ssr": {
