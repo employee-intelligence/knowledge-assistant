@@ -24,6 +24,15 @@ export const routes: Routes = [
       ),
   },
   {
+    path: 'register',
+    pathMatch: 'full',
+    title: 'Create your account · Internal Knowledge Assistant',
+    loadComponent: () =>
+      import('./features/auth/views/register-view/register-view.component').then(
+        (module) => module.RegisterViewComponent,
+      ),
+  },
+  {
     path: 'accept-invite',
     pathMatch: 'full',
     title: 'Set your password · Internal Knowledge Assistant',
