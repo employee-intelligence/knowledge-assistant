@@ -1,7 +1,7 @@
 # Frontend Architecture and Coding Conventions
 ### Internal Knowledge Assistant — Angular v22
 
-**Phase 1 scope note:** Authentication and the Admin panel are **not** part of this phase. They are documented at the end of this file under Phase 2 (Future) so the structure is ready for them later, but nothing in Phase 1 depends on them. Phase 1 covers three views only: the Dashboard (ask a question), the Response view (see the answer), and the History view (past questions).
+**Phase 1 scope note:** Authentication and the Admin panel are **not** part of this phase. They are documented at the end of this file under Phase 2, where the screens are built but deliberately unwired. Nothing in Phase 1 depends on them. Phase 1 covers three views only: the Dashboard (ask a question), the Response view (see the answer), and the History view (past questions).
 
 ---
 
@@ -160,10 +160,21 @@ A view exists only to assemble the components its route needs and connect them t
 
 ---
 
-## Phase 2 (Future): Authentication and Admin
+## Phase 2: Authentication and Admin (screens built, not wired)
 
-Not part of the current build. Documented here so the structure can absorb it later without a rewrite.
+The screens exist and are reviewable. What is deliberately missing is the part that needs a decision about accounts, a session and a server that enforces anything.
 
-- **Auth:** `login-view`, `register-view` under `views/`; `auth.service.ts` and `auth.guard.ts` under `core/`; an `auth.interceptor.ts` for attaching session state to requests.
-- **Admin:** `admin-dashboard-view`, `admin-documents-view` under `views/`; `document.service.ts` and `admin.guard.ts` under `core/`; feature components under `features/admin/components` (document list, document upload).
-- **Routing:** Phase 2 routes are added as additional lazy-loaded entries in `app.routes.ts`, guarded by `auth.guard.ts` / `admin.guard.ts`, without needing to restructure the Phase 1 views or features already built.
+**Built, as UI only:**
+
+- **Auth:** `login-view` and `accept-invite-view` under `features/auth/views/`, sharing `auth-layout` in `features/auth/components/`. Neither authenticates: both collect input and then state that accounts are not connected, so nobody types a real password into a drawing.
+- **Admin:** `admin-dashboard-view`, `admin-documents-view` and `admin-question-logs-view` under `views/`, with components under `features/admin/components/`. Uploading and deleting act on a placeholder list in `core/data/mock-admin.data.ts` and say they did.
+- **Roles:** `ViewerService` holds the viewer. The role is a signal, not a guard, and the sidebar switch previews both. An employee reaching an admin URL gets `admin-access-required` rather than an empty screen.
+- **Reusable pieces added for this work:** `app-badge`, `app-form-field`, `app-empty-state` and `app-confirm-dialog` under `shared/components/`. The dialog is a native `<dialog>`, so its focus trap and Escape handling come from the browser.
+
+**Still to build when accounts are decided:**
+
+- `auth.service.ts` and `auth.guard.ts` under `core/`, and an `auth.interceptor.ts` for attaching session state to requests.
+- `document.service.ts` and a `question-log.service.ts`, replacing `mock-admin.data.ts`.
+- `admin.guard.ts`, replacing the `viewer.isAdministrator()` branches. The role checks are already in the two places a guard would need to cover: the sidebar link and the three admin views.
+- The shell's plain-layout list in `app.component.ts` should become route data, once there are enough signed-out routes to justify it.
+
