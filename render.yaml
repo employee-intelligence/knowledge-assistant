@@ -6,6 +6,10 @@ services:
     name: knowledge-assistant-backend
     runtime: docker
     plan: free
+    # `main` is the repository default but is eight commits behind `develop`,
+    # which is where the work actually is. Without this the backend would be
+    # rebuilt from code that predates the conversations migration.
+    branch: develop
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
 
@@ -61,3 +65,22 @@ services:
       # instance and a migration cannot land in only one of them.
       - key: DATABASE_URL
         sync: false
+
+  # The Angular app, server-rendered, so it needs a Node runtime and not a static
+  # host: `ng build` emits both the browser bundle and the Express server that
+  # renders the first paint.
+  - type: web
+    name: knowledge-assistant-frontend
+    runtime: node
+    plan: free
+    branch: develop
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run serve:ssr:frontend
+
+    envVars:
+      # Angular 22 requires ^22.22.3, ^24.15.0 or newer, and resolves the 24.x line
+      # to whatever is current. `PORT` is set by Render and read by src/server.ts,
+      # so it is not declared here.
+      - key: NODE_VERSION
+        value: "24"
