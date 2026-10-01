@@ -18,8 +18,8 @@ describe('ViewerService', () => {
 
   it('names the viewer and derives their initials', () => {
     expect(viewer.viewer().name).toBe(MOCK_VIEWER.name);
-    // "Ama Mensah" has no stop words in it, so both words contribute a letter.
-    expect(viewer.initials()).toBe('AM');
+    // "Ama Konadu" has no stop words in it, so both words contribute a letter.
+    expect(viewer.initials()).toBe('AK');
   });
 
   it('swaps the role for preview without touching the rest of the viewer', () => {

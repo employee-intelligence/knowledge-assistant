@@ -13,7 +13,7 @@ export interface Viewer {
 /** Human-readable names for each role. */
 export const ROLE_LABELS: Record<Role, string> = {
   employee: 'Employee',
-  administrator: 'Administrator',
+  administrator: 'HR Administrator',
 };
 
 /**
@@ -22,8 +22,8 @@ export const ROLE_LABELS: Record<Role, string> = {
  */
 export const MOCK_VIEWER: Viewer = {
   id: 'viewer-1',
-  name: 'Ama Mensah',
-  email: 'ama.mensah@acmetech.example',
+  name: 'Ama Konadu',
+  email: 'ama.konadu@acmetech.example',
   jobTitle: 'People Operations',
   role: 'employee',
 };

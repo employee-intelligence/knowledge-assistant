@@ -55,7 +55,7 @@ interface PasswordRule {
           label="Full name"
           icon="user"
           autocomplete="name"
-          placeholder="Ama Mensah"
+          placeholder="Ama Konadu"
           [required]="true"
           [value]="name()"
           [error]="nameError()"
@@ -143,10 +143,10 @@ interface PasswordRule {
 })
 export class AcceptInviteViewComponent {
   /** Full name as typed. */
-  protected readonly name = signal('Ama Mensah');
+  protected readonly name = signal('Ama Konadu');
 
   /** Work email the invitation was sent to. */
-  protected readonly email = signal('ama.mensah@acmetech.example');
+  protected readonly email = signal('ama.konadu@acmetech.example');
 
   /** Chosen password. */
   protected readonly password = signal('');

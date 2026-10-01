@@ -19,8 +19,8 @@ describe('QuestionLogDetailComponent', () => {
   const log = (overrides: Partial<QuestionLog> = {}): QuestionLog => ({
     id: 'q-1',
     question: 'How many annual leave days do I get?',
-    askedBy: 'Ama Mensah',
-    askedByInitials: 'AM',
+    askedBy: 'Ama Konadu',
+    askedByInitials: 'AK',
     createdAt: new Date().toISOString(),
     outcome: 'answered',
     answer: 'Twenty-five days a year, accruing monthly.',
