@@ -8,6 +8,7 @@ import {
 } from '../../core/models/question-log.model';
 import { ViewerService } from '../../core/services/viewer.service';
 import { AdminAccessRequiredComponent } from '../../features/admin/components/admin-access-required/admin-access-required.component';
+import { QuestionLogDetailComponent } from '../../features/admin/components/question-log-detail/question-log-detail.component';
 import { QuestionLogTableComponent } from '../../features/admin/components/question-log-table/question-log-table.component';
 import { ViewHeaderComponent } from '../../features/chat/components/view-header/view-header.component';
 import { ButtonComponent } from '../../shared/components/button/button.component';
@@ -36,6 +37,7 @@ const ALL_LABEL = 'All';
     ButtonComponent,
     EmptyStateComponent,
     InputComponent,
+    QuestionLogDetailComponent,
     QuestionLogTableComponent,
     ViewHeaderComponent,
   ],
@@ -79,7 +81,7 @@ const ALL_LABEL = 'All';
             <p class="mt-5 text-xs text-muted-foreground">{{ summary() }}</p>
 
             <div class="mt-2">
-              <app-question-log-table [logs]="visibleLogs()" />
+              <app-question-log-table [logs]="visibleLogs()" (selected)="openLog($event)" />
             </div>
           } @else {
             <div class="mt-5 rounded-lg border border-border bg-card py-6">
@@ -99,6 +101,18 @@ const ALL_LABEL = 'All';
     } @else {
       <app-admin-access-required />
     }
+
+    <!--
+      Rendered outside the access branch so the drawer survives a role change or a
+      filter change that empties the list: closing the browser tab is not how a
+      dialog is dismissed, and a filter typed behind an open drawer must not strand
+      the entry being read.
+    -->
+    <app-question-log-detail
+      [isOpen]="openLogId() !== null"
+      [log]="openLogEntry()"
+      (closed)="closeLog()"
+    />
   `,
 })
 export class AdminQuestionLogsViewComponent {
@@ -110,6 +124,14 @@ export class AdminQuestionLogsViewComponent {
 
   /** Outcome the log is narrowed to. */
   protected readonly outcome = signal<OutcomeFilter>('all');
+
+  /**
+   * Id of the log being read, or null when the drawer is closed.
+   *
+   * The id is held rather than the entry so the drawer survives a filter change:
+   * searching behind an open drawer would otherwise blank what is being read.
+   */
+  private readonly openLogId = signal<string | null>(null);
 
   /** Filters offered above the log. */
   protected readonly filters = FILTERS;
@@ -159,6 +181,21 @@ export class AdminQuestionLogsViewComponent {
   /** Label for a filter chip. */
   protected filterLabel(filter: OutcomeFilter): string {
     return filter === 'all' ? ALL_LABEL : QUESTION_OUTCOME_LABELS[filter];
+  }
+
+  /** The log being read, looked up by id so a filter change cannot blank it. */
+  protected readonly openLogEntry = computed<QuestionLog | null>(
+    () => MOCK_QUESTION_LOGS.find((log) => log.id === this.openLogId()) ?? null,
+  );
+
+  /** Opens a log for reading. */
+  protected openLog(log: QuestionLog): void {
+    this.openLogId.set(log.id);
+  }
+
+  /** Closes the drawer. */
+  protected closeLog(): void {
+    this.openLogId.set(null);
   }
 
   /** Resets both filters, which is what the empty state's action does. */
