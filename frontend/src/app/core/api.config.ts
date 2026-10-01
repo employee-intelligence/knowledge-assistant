@@ -4,8 +4,16 @@
  *
  * The backend serves CORS with a wildcard origin, so the browser calls it
  * directly and no dev-server proxy is involved.
+ *
+ * Pointed at a locally running backend for now. Start it with
+ * `uvicorn app.main:app --reload` from `backend/`.
  */
-export const API_BASE_URL = 'https://knowledge-assistant-backend-88gw.onrender.com';
+export const API_BASE_URL = 'http://localhost:8000';
+
+// The deployed backend. Kept here so restoring it is a matter of swapping the two
+// lines, and not of finding the URL again. It does not serve `/chat/stream` yet,
+// which is why the app is talking to localhost.
+// export const API_BASE_URL = 'https://knowledge-assistant-backend-88gw.onrender.com';
 
 /**
  * How long a single request may take before it is abandoned.
@@ -17,10 +25,12 @@ export const API_BASE_URL = 'https://knowledge-assistant-backend-88gw.onrender.c
 export const API_TIMEOUT_MS = 90_000;
 
 /**
- * Where the session id is kept across a reload.
+ * Where this browser's client id is kept, so its conversations are still its own
+ * after a reload.
  *
- * `sessionStorage` rather than `localStorage` on purpose: the backend scopes
- * history to a session and expires it, so a conversation that outlives the tab
- * would only ever come back as an empty list.
+ * `localStorage` rather than `sessionStorage` on purpose. The backend scopes
+ * conversations to a client id and never expires them, so a conversation asked in
+ * one tab is still there in the next one, and dropping the id when the tab closed
+ * would strand every conversation this browser had.
  */
-export const SESSION_STORAGE_KEY = 'ika.session';
+export const CLIENT_ID_STORAGE_KEY = 'ika.clientId';

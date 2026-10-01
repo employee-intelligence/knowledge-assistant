@@ -1,6 +1,6 @@
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
 from llama_index.core.node_parser import MarkdownNodeParser
-from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
+from llama_index.embeddings.nvidia import NVIDIAEmbedding
 
 from app.config import settings
 
@@ -27,5 +27,10 @@ def build_index() -> VectorStoreIndex:
         n.excluded_embed_metadata_keys = NOISE + ["file_name"]
         n.excluded_llm_metadata_keys = NOISE
 
-    embed = GoogleGenAIEmbedding(model_name=settings.embed_model, api_key=settings.google_api_key)
+    # The retrieval key, kept separate from the generation key so embedding traffic
+    # has its own quota. The index is rebuilt on every start, so a changed
+    # embedding model takes effect on the next boot with no migration.
+    embed = NVIDIAEmbedding(
+        model=settings.embed_model, api_key=settings.nvidia_embedding_api_key
+    )
     return VectorStoreIndex(nodes, embed_model=embed)

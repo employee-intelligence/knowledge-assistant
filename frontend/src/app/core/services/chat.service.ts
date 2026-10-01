@@ -1,107 +1,110 @@
 import { DestroyRef, Injectable, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { Observable, catchError, finalize, map, of, switchMap } from 'rxjs';
+import { Observable, EMPTY, catchError, finalize, map, mergeMap, of, reduce, switchMap, throwError } from 'rxjs';
 
-import { Message } from '../models/message.model';
-import { Turn } from '../models/turn.model';
-import { ApiError, ApiService } from './api.service';
-import { HistoryService } from './history.service';
-import { SessionService } from './session.service';
+import { SourceDto } from '../models/api.model';
+import { UNTITLED_CONVERSATION } from '../models/conversation.model';
+import { SourceReference } from '../models/message.model';
+import { ApiError, ApiService, STREAM_INCOMPLETE_MESSAGE } from './api.service';
+import { ConversationService } from './conversation.service';
+import { IdentityService } from './identity.service';
 
 /**
- * Owns the open conversation: which turn the response view is showing, the turns
- * that lead up to it, and the request in flight while an answer is retrieved.
+ * Owns the open conversation while a question is in flight: what is being asked,
+ * what the answer is doing, and what a failure leaves behind.
  *
- * It keeps no copy of the conversation. The turns live in `HistoryService`,
- * which is backed by the backend's own history for the session, so the thread,
- * the sidebar and the history view cannot drift apart. What this service adds is
- * that list read for one turn: which question is open, which messages make up
- * its thread, and where an answer currently stands.
+ * The conversation itself lives in `ConversationService`, which is backed by the
+ * backend's own record of it. This service keeps no copy of the thread and never
+ * decides which conversation a question belongs to beyond the one that is open:
+ * that is the single thing that makes a follow-up a follow-up rather than the
+ * start of a second conversation, so there is one decision to get right and it is
+ * made here, in one place, on every question.
  */
 @Injectable({ providedIn: 'root' })
 export class ChatService {
   private readonly api = inject(ApiService);
-  private readonly history = inject(HistoryService);
-  private readonly session = inject(SessionService);
+  private readonly conversations = inject(ConversationService);
+  private readonly identity = inject(IdentityService);
   private readonly destroyRef = inject(DestroyRef);
-
-  /**
-   * The turn the view was asked to show, or null to follow the newest one. The
-   * dashboard leaves it null so that asking a question moves the view to the turn
-   * it just created, with no id to thread through the navigation.
-   */
-  private readonly requestedTurnIdState = signal<string | null>(null);
 
   private readonly askingState = signal(false);
 
-  /** Id of the open turn, or null when there is nothing to show. */
-  readonly activeTurnId = computed(() => this.activeTurn()?.id ?? null);
+  /**
+   * True between the backend saying the answer is being written and its first
+   * words arriving.
+   *
+   * The configured model works before it writes its first word, and that work is
+   * not the answer, so it is not shown. Without this the thread would sit on a
+   * spinner for all of it, which reads as a broken app rather than as a slow one.
+   */
+  private readonly preparingState = signal(false);
+
+  /** True while an answer is being worked on but has no text to show yet. */
+  readonly isPreparing = this.preparingState.asReadonly();
 
   /** True while a question is being sent or an answer is being retrieved. */
   readonly isLoading = this.askingState.asReadonly();
 
-  /** True while the session's turns have not arrived yet. */
-  readonly isResolving = computed(() => !this.history.isLoaded());
+  /** The open conversation's messages, oldest first. */
+  readonly messages = this.conversations.messages;
 
-  /** True when the conversation's session is gone and its history with it. */
-  readonly sessionExpired = this.session.sessionExpired;
-
-  /** The open turn, or undefined when the requested id is not one of this session's. */
-  readonly activeTurn = computed<Turn | undefined>(() => {
-    const turns = this.history.turns();
-    const requested = this.requestedTurnIdState();
-
-    if (requested === null) {
-      return turns[turns.length - 1];
-    }
-
-    return turns.find((turn) => turn.id === requested);
-  });
-
-  /** Title shown in the thread header, which is the question itself. */
-  readonly threadTitle = computed(() => this.activeTurn()?.question ?? '');
+  /** The open conversation's id, or null when none is open. */
+  readonly activeConversationId = this.conversations.activeId;
 
   /**
-   * The thread for the open turn: every turn up to and including it, flattened
-   * into the user and assistant messages the thread renders. Opening an older
-   * turn shows the conversation that led to it rather than a bare answer, which
-   * is what makes a history link worth following.
-   */
-  readonly messages = computed<Message[]>(() => {
-    const turns = this.history.turns();
-    const active = this.activeTurn();
-
-    if (!active) {
-      return [];
-    }
-
-    const lastIndex = turns.findIndex((turn) => turn.id === active.id);
-
-    return turns
-      .slice(0, lastIndex + 1)
-      .flatMap((turn) => [this.toMessage(turn, 'user'), this.toMessage(turn, 'assistant')]);
-  });
-
-  /** True once the open turn has something to render. */
-  readonly hasMessages = computed(() => this.activeTurn() !== undefined);
-
-  /**
-   * True when the conversation is loaded and holds no questions at all.
+   * True until the conversation's messages are known.
    *
-   * Distinct from having no open turn. A session with nothing in it is a
-   * conversation waiting for its first question, which is where a reload on a new
-   * session lands and what the view used to misreport as a missing question.
+   * Covers both the list arriving and the thread itself, so the view can tell
+   * "still loading" from "loaded and empty" and never show a not-found page for a
+   * conversation that is simply on its way.
    */
-  readonly isEmpty = computed(() => this.history.isLoaded() && this.history.turns().length === 0);
+  readonly isResolving = computed(
+    () => !this.conversations.isLoaded() || this.conversations.isLoadingThread(),
+  );
+
+  /** True once the open conversation has something to render. */
+  readonly hasMessages = computed(() => this.messages().length > 0);
 
   /**
-   * Asks a question.
+   * True when the conversation is loaded and holds no messages at all.
    *
-   * The turn is recorded before the request goes out, so the thread shows the
-   * question and its pending state straight away rather than after the round
-   * trip. That happens only once the session's history has loaded, because a
-   * turn's id is its position in that list, and creating one early could hand it
-   * a position the server then gives to a different question.
+   * Distinct from having no open conversation. An empty one is a conversation
+   * waiting for its first question, which is what a first visit lands on and what
+   * the view would otherwise misreport as a missing conversation.
+   */
+  readonly isEmpty = computed(() => !this.isResolving() && this.messages().length === 0);
+
+  /**
+   * True when the conversation this route names is not there.
+   *
+   * A link to a conversation that was deleted, or that belongs to another client,
+   * is answered with this rather than with an empty thread: an empty thread would
+   * read as a conversation that has lost its history, which is the opposite of
+   * what happened.
+   */
+  readonly isMissing = this.conversations.isMissing;
+
+  /**
+   * Title shown in the thread header.
+   *
+   * The conversation's own name once it has one, and a neutral label while it does
+   * not: a fresh conversation is not an error, so it is not titled as one.
+   */
+  readonly threadTitle = computed(
+    () => this.conversations.activeConversation()?.title ?? UNTITLED_CONVERSATION,
+  );
+
+  /**
+   * Asks a question in the open conversation.
+   *
+   * Both halves of the exchange are recorded before the request goes out, so the
+   * thread shows the question and its pending answer straight away rather than
+   * after the round trip.
+   *
+   * The conversation is resolved first, because there is nothing to add a message
+   * to until there is one. A question asked on a first visit waits for the list to
+   * arrive rather than being dropped, which is the difference between a question
+   * that works and one that vanishes the first time it is asked.
    */
   ask(question: string): void {
     const trimmed = question.trim();
@@ -110,141 +113,216 @@ export class ChatService {
       return;
     }
 
-    this.history
+    this.conversations
       .ready()
       .pipe(
         switchMap(() => {
-          const turnId = this.history.appendPendingTurn(trimmed);
-          this.requestedTurnIdState.set(turnId);
+          // Read after waiting: the open conversation is decided by the list that
+          // was just fetched, and reading it before the wait would be reading the
+          // state this question is waiting for.
+          const conversationId = this.conversations.activeId();
 
-          return this.dispatch(turnId, trimmed);
+          if (conversationId === null) {
+            return EMPTY;
+          }
+
+          const exchange = this.conversations.appendExchange(trimmed);
+
+          return this.dispatch(conversationId, exchange.assistantId, trimmed);
         }),
-        finalize(() => this.askingState.set(false)),
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe();
   }
 
   /**
-   * Asks the open turn's question again after a failure.
+   * Asks a failed exchange's question again.
    *
-   * The turn is reused rather than duplicated so it keeps its position, so the
-   * link to it and the highlight in the sidebar stay valid. The backend records
-   * every `/chat` call as a history entry, so a retried question does appear
-   * twice once the session's history is refetched; there is no endpoint that
-   * removes it.
+   * The failed answer and its question are taken out and the question asked again
+   * in their place, so a retried exchange does not stack a second copy under the
+   * failure it is retrying. A retried question does appear twice in the stored
+   * conversation once it is refetched, because the backend records every message
+   * sent; there is no endpoint that removes one.
    */
-  retry(turnId: string): void {
-    const turn = this.history.turnAt(turnId);
-
-    if (!turn || this.askingState()) {
+  retry(messageId: string): void {
+    if (this.askingState()) {
       return;
     }
 
-    this.requestedTurnIdState.set(turnId);
-    this.askingState.set(true);
-    this.history.markTurnPending(turnId);
+    const question = this.questionFor(messageId);
+    const conversationId = this.conversations.activeId();
 
-    this.dispatch(turnId, turn.question)
-      .pipe(
-        finalize(() => this.askingState.set(false)),
-        takeUntilDestroyed(this.destroyRef),
-      )
+    if (question === null || !conversationId) {
+      return;
+    }
+
+    this.conversations.removeExchange(messageId);
+
+    const exchange = this.conversations.appendExchange(question);
+
+    this.dispatch(conversationId, exchange.assistantId, question)
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe();
-  }
-
-  /**
-   * Shows a stored turn. An id that is not in this session's history leaves the
-   * view with nothing to render, which it reports as not found.
-   */
-  openTurn(turnId: string | null): void {
-    this.requestedTurnIdState.set(turnId);
-  }
-
-  /**
-   * Stops following one turn, so the view returns to the newest one.
-   *
-   * This is only about which turn is open. It deliberately keeps the session and
-   * the turns, so returning from an older turn does not throw the conversation
-   * away.
-   */
-  stopFollowing(): void {
-    this.requestedTurnIdState.set(null);
   }
 
   /**
    * Starts a new conversation.
    *
-   * This retires the session rather than only pointing the view back at the start
-   * of the thread. The backend scopes history to a session id, so keeping it would
-   * list the previous conversation's questions in the sidebar of what is meant to
-   * be an empty one, and the next question would be filed beside them.
+   * A real one, created on the backend, rather than the view being pointed back at
+   * the start of the current thread: the thread it left behind stays in the
+   * sidebar, which is the whole point of conversations outliving the question that
+   * started them.
    */
   startNewConversation(): void {
-    this.requestedTurnIdState.set(null);
-    this.session.startNew();
-    this.history.clear();
+    this.conversations.createConversation().pipe(takeUntilDestroyed(this.destroyRef)).subscribe();
+  }
+
+  /** Opens an existing conversation, loading its thread. */
+  openConversation(conversationId: string): void {
+    this.conversations.openConversation(conversationId);
   }
 
   /**
-   * Sends one question and writes the outcome back onto its turn.
+   * The question a failed answer belongs to, or null when there is none.
    *
-   * Failures are recorded on the turn instead of thrown, so a turn is never left
-   * searching forever and the user has something to retry from. The turn exists
-   * before the session is resolved for the same reason: a session that cannot be
-   * created still leaves the question on screen with an explanation.
-   *
-   * A session the backend will not accept is the exception, because nothing can be
-   * recorded for it. The question was never asked, so a failed-answer card would be
-   * a lie, and every turn beside it was filed under the same dead id. The
-   * conversation is reset to what a fresh landing looks like and left there: there
-   * is nothing of this one left to show, and the next question opens the session
-   * that replaces it.
+   * A message carries its own id, so the question is the message before it in the
+   * thread. That is the same relationship the backend stores, so it holds for a
+   * conversation loaded from the backend as well as for one being answered here.
    */
-  private dispatch(turnId: string, question: string): Observable<null> {
-    this.askingState.set(true);
+  private questionFor(messageId: string): string | null {
+    const messages = this.messages();
+    const index = messages.findIndex((message) => message.id === messageId);
 
-    return this.session.ensureSession().pipe(
-      switchMap((sessionId) => this.api.ask(sessionId, question)),
+    if (index === -1) {
+      return null;
+    }
+
+    for (let at = index - 1; at >= 0; at -= 1) {
+      const message = messages[at];
+
+      if (message.role === 'user') {
+        return message.text;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Sends one question and writes the outcome back onto its answer message.
+   *
+   * The answer is streamed: each piece is appended to the message as it arrives,
+   * so the thread writes the answer out rather than showing a spinner and then
+   * replacing it with the finished text. `done` is what settles the message, and it
+   * carries the authoritative answer, so a refusal or a gap in the corpus still
+   * ends up worded the same way the backend words it.
+   *
+   * A failure mid-stream leaves whatever was already written on the message, since
+   * the message is never left searching forever and the user has something to
+   * retry from.
+   */
+  private dispatch(
+    conversationId: string,
+    messageId: string,
+    question: string,
+  ): Observable<null> {
+    this.askingState.set(true);
+    this.preparingState.set(false);
+
+    return this.stream(conversationId, question, messageId).pipe(
       map((answer) => {
-        this.history.resolveTurn(turnId, answer);
+        this.conversations.resolveMessage(messageId, answer);
+        // The backend stamps the conversation as active when it stores the answer,
+        // and the list is ordered by that. Re-reading it here is what lifts a
+        // conversation that was answered now to the top of the sidebar, instead of
+        // leaving it where it was the last time the page loaded.
+        this.conversations.refreshSummaries();
 
         return null;
       }),
       catchError((error: unknown) => {
-        this.session.handleSessionLoss(error);
-
-        if (this.session.sessionExpired()) {
-          this.requestedTurnIdState.set(null);
-          this.history.clear();
-
-          return of(null);
-        }
-
-        this.history.failTurn(turnId, this.describeFailure(error));
+        this.preparingState.set(false);
+        this.conversations.failMessage(messageId, this.describeFailure(error));
 
         return of(null);
+      }),
+      finalize(() => {
+        this.askingState.set(false);
+        this.preparingState.set(false);
       }),
     );
   }
 
-  /** Both messages of one turn. The user's half never carries citations. */
-  private toMessage(turn: Turn, role: Message['role']): Message {
-    const isUser = role === 'user';
+  /**
+   * One streamed question, resolved to the same shape the answer is written with.
+   *
+   * A stream that ends without a `done` is treated as a failure rather than as an
+   * empty answer: a connection dropped mid-answer has produced no answer, and
+   * reporting it as "not found in the documents" would blame the corpus for it.
+   */
+  private stream(
+    conversationId: string,
+    question: string,
+    messageId: string,
+  ): Observable<{ text: string; status: 'answered' | 'not-found'; sources: SourceReference[] }> {
+    return this.api.sendMessage(conversationId, this.identity.clientId(), question).pipe(
+      reduce(
+        (answer, event) => {
+          if (event.type === 'status') {
+            this.preparingState.set(true);
 
+            return answer;
+          }
+
+          if (event.type === 'delta') {
+            // Text has started arriving, so whatever was said about writing the
+            // answer has been overtaken by the real thing.
+            this.preparingState.set(false);
+            this.conversations.appendStreamedText(messageId, event.text);
+
+            return answer;
+          }
+
+          if (event.type === 'title') {
+            // The conversation's name, sent once after the first answer. Applied
+            // whether or not this is the conversation on screen: a user who
+            // switched conversations mid-answer should still see it named in the
+            // sidebar.
+            this.conversations.applyTitle(conversationId, event.title);
+
+            return answer;
+          }
+
+          if (event.type === 'error') {
+            throw new ApiError(event.detail, 0, true);
+          }
+
+          return {
+            text: event.answer,
+            status: event.answered ? ('answered' as const) : ('not-found' as const),
+            sources: event.sources.map((dto) => this.toSource(dto)),
+          };
+        },
+        null as { text: string; status: 'answered' | 'not-found'; sources: SourceReference[] } | null,
+      ),
+      mergeMap((answer) =>
+        answer === null ? throwError(() => new ApiError(STREAM_INCOMPLETE_MESSAGE, 0, true)) : of(answer),
+      ),
+    );
+  }
+
+  /** A wire source as the domain shape, matching `ApiService`'s own mapping. */
+  private toSource(dto: SourceDto): SourceReference {
     return {
-      id: `${turn.id}-${role}`,
-      role,
-      text: isUser ? turn.question : turn.answer,
-      createdAt: turn.createdAt,
-      status: turn.status,
-      sources: isUser ? [] : turn.sources,
-      documentCount: isUser ? 0 : new Set(turn.sources.map((source) => source.document)).size,
+      document: dto.document,
+      section: dto.section,
+      snippet: dto.snippet,
+      score: dto.score,
     };
   }
 
   /**
-   * What a failed turn says. A question the backend rejected is the user's to
+   * What a failed answer says. A question the backend rejected is the user's to
    * fix, so its own wording is passed through with a nudge to rephrase; anything
    * else reads as temporary and invites a retry.
    */

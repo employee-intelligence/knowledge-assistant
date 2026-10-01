@@ -42,6 +42,7 @@ interface Citation extends SourceReference {
         class="absolute top-2 right-2 opacity-0 transition-opacity group-hover:opacity-100
           focus-visible:opacity-100"
         [style.opacity]="hasCopied() ? 1 : null"
+        [hidden]="isStreaming()"
         (click)="copy()"
       >
         <app-icon [name]="hasCopied() ? 'check' : 'copy'" [size]="12" />
@@ -49,6 +50,13 @@ interface Citation extends SourceReference {
       </button>
 
       <div class="answer-prose pr-16 text-sm leading-relaxed text-foreground" [innerHTML]="html()"></div>
+
+      @if (isStreaming()) {
+        <span
+          class="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-foreground align-text-bottom"
+          aria-hidden="true"
+        ></span>
+      }
 
       @if (grounding(); as summary) {
         <p class="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -74,6 +82,14 @@ export class AnswerCardComponent {
   readonly message = input.required<Message>();
 
   /**
+   * True while the answer is still arriving.
+   *
+   * Suppresses the copy control, which would otherwise copy a half-written answer,
+   * and shows a caret so it is visible that the text is still being written.
+   */
+  readonly isStreaming = input(false);
+
+  /**
    * The answer, converted from markdown.
    *
    * Bound as HTML so bold labels, lists and tables render as themselves instead
@@ -92,12 +108,20 @@ export class AnswerCardComponent {
    * Two citations of the same section are keyed apart by their position, because
    * the backend returns no id and the same document and section can legitimately
    * be cited twice with different passages.
+   *
+   * Nothing is cited while the answer is still arriving. Citations belong to the
+   * finished answer and are rendered last, from the stream's closing event: the
+   * text can still be replaced by a refusal that is grounded in nothing, and a
+   * citation list sitting above an answer that turns into one is a claim the app
+   * would have to take back.
    */
   protected readonly citations = computed<Citation[]>(() =>
-    this.message().sources.map((source, index) => ({
-      ...source,
-      key: `${source.document}-${source.section}-${index}`,
-    })),
+    this.isStreaming()
+      ? []
+      : this.message().sources.map((source, index) => ({
+          ...source,
+          key: `${source.document}-${source.section}-${index}`,
+        })),
   );
 
   /**
@@ -105,10 +129,10 @@ export class AnswerCardComponent {
    *
    * Distinct documents rather than citations, so one heavily quoted policy is not
    * reported as several. Null when nothing was cited, which is the case the
-   * not-found card already covers.
+   * not-found card already covers, and while the answer is still streaming.
    */
   protected readonly grounding = computed(() => {
-    const count = this.message().documentCount;
+    const count = this.isStreaming() ? 0 : this.message().documentCount;
 
     if (count === 0) {
       return null;

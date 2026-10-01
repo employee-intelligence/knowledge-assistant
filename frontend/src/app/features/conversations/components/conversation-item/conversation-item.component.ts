@@ -1,27 +1,24 @@
 import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
 
-import { HistoryEntry, type AnswerStatus } from '../../../../core/models/question.model';
-import { IconComponent, type IconName } from '../../../../shared/components/icon/icon.component';
+import { UNTITLED_CONVERSATION, type Conversation } from '../../../../core/models/conversation.model';
+import { IconComponent } from '../../../../shared/components/icon/icon.component';
 import { toInitials } from '../../../../shared/utils/initials.util';
+import { formatRelativeTime } from '../../../../shared/utils/relative-time.util';
 
 /** Which surface the row is rendered on. */
-export type HistoryItemAppearance = 'sidebar' | 'panel' | 'rail';
-
-/** Label, icon and colour for each answer status. */
-const STATUS_META: Record<AnswerStatus, { label: string; icon: IconName; classes: string }> = {
-  answered: { label: 'Answered', icon: 'check-circle-2', classes: 'bg-success-bg text-success' },
-  'not-found': { label: 'No match', icon: 'search-x', classes: 'bg-warning-bg text-warning' },
-  pending: { label: 'Answering', icon: 'loader-2', classes: 'bg-muted text-muted-foreground' },
-  failed: { label: 'Failed', icon: 'info', classes: 'bg-danger-bg text-danger' },
-};
+export type ConversationItemAppearance = 'sidebar' | 'panel' | 'rail';
 
 /**
- * One past question, rendered in whichever of the three forms the current
- * layout calls for: a compact row on the sidebar, an initials chip on the
- * collapsed rail, or a full card with an answer preview in the history view.
+ * One conversation, rendered in whichever of the three forms the current layout
+ * calls for: a compact row on the sidebar, an initials chip on the collapsed
+ * rail, or a full card in the conversations view.
+ *
+ * The row is named for the conversation and dated by when it was last active, not
+ * by when it was started, because with long-lived conversations the two are
+ * usually different and the one a user recognises is the one they were last in.
  */
 @Component({
-  selector: 'app-history-item',
+  selector: 'app-conversation-item',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [IconComponent],
   host: { class: 'block' },
@@ -34,8 +31,8 @@ const STATUS_META: Record<AnswerStatus, { label: string; icon: IconName; classes
             font-semibold transition-colors"
           [class]="railClasses()"
           [attr.aria-current]="isSelected() ? 'page' : null"
-          [attr.title]="entry().question.title"
-          (click)="selected.emit(entry().question.id)"
+          [attr.title]="name()"
+          (click)="selected.emit(conversation().id)"
         >
           {{ initials() }}
         </button>
@@ -47,23 +44,14 @@ const STATUS_META: Record<AnswerStatus, { label: string; icon: IconName; classes
             transition-colors"
           [class]="panelClasses()"
           [attr.aria-current]="isSelected() ? 'page' : null"
-          (click)="selected.emit(entry().question.id)"
+          (click)="selected.emit(conversation().id)"
         >
           <span class="min-w-0 flex-1 text-left">
             <span class="block text-sm font-medium text-foreground">
-              {{ entry().question.title }}
+              {{ name() }}
             </span>
-            <span class="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-              <span
-                class="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 font-medium"
-                [class]="status().classes"
-              >
-                <app-icon [name]="status().icon" [size]="11" />
-                {{ status().label }}
-              </span>
-            </span>
-            <span class="mt-1.5 line-clamp-2 block text-xs leading-relaxed text-muted-foreground">
-              {{ entry().answerPreview || 'No answer yet.' }}
+            <span class="mt-1.5 block text-xs text-muted-foreground">
+              {{ relativeTime() }}
             </span>
           </span>
           <app-icon
@@ -80,11 +68,11 @@ const STATUS_META: Record<AnswerStatus, { label: string; icon: IconName; classes
             transition-colors"
           [class]="sidebarClasses()"
           [attr.aria-current]="isSelected() ? 'page' : null"
-          (click)="selected.emit(entry().question.id)"
+          (click)="selected.emit(conversation().id)"
         >
           <span class="min-w-0 flex-1 text-left">
             <span class="block truncate text-sm font-medium" [class]="titleClasses()">
-              {{ entry().question.title }}
+              {{ name() }}
             </span>
           </span>
         </button>
@@ -92,31 +80,42 @@ const STATUS_META: Record<AnswerStatus, { label: string; icon: IconName; classes
     }
   `,
 })
-export class HistoryItemComponent {
-  /** The question this row represents. */
-  readonly entry = input.required<HistoryEntry>();
+export class ConversationItemComponent {
+  /** The conversation this row represents. */
+  readonly conversation = input.required<Conversation>();
 
   /** Surface the row is rendered on. */
-  readonly appearance = input<HistoryItemAppearance>('sidebar');
+  readonly appearance = input<ConversationItemAppearance>('sidebar');
 
   /** Highlights the row as the currently open conversation. */
   readonly isSelected = input(false);
 
-  /** Emits the question id when the row is activated. */
+  /** Emits the conversation id when the row is activated. */
   readonly selected = output<string>();
+
+  /**
+   * The conversation's name, falling back to a neutral label while it has none.
+   *
+   * A conversation with no title is one that has not been answered in yet, which
+   * is not an error, so it is not shown as one.
+   */
+  protected readonly name = computed(() => this.conversation().title ?? UNTITLED_CONVERSATION);
 
   /**
    * Initials for the collapsed rail.
    *
-   * Taken from the question itself, because the backend's history rows carry
-   * nothing but the question, its answer and a timestamp. A separate short topic
-   * would have to be invented, and an invented topic in a rail of initials is
-   * worse than an honest one derived from what was asked.
+   * Derived from the conversation's name where it has one, and left blank where it
+   * does not: the rail shows initials, and an untitled conversation has no topic
+   * to take them from.
    */
-  protected readonly initials = computed(() => toInitials(this.entry().question.title));
+  protected readonly initials = computed(() => {
+    const title = this.conversation().title;
 
-  /** Label, icon and colour for the current answer status. */
-  protected readonly status = computed(() => STATUS_META[this.entry().question.answerStatus]);
+    return title ? toInitials(title) : '···';
+  });
+
+  /** When the conversation was last active, as a reader would say it. */
+  protected readonly relativeTime = computed(() => formatRelativeTime(this.conversation().updatedAt));
 
   /** Resolved classes for the collapsed-rail chip. */
   protected readonly railClasses = computed(() =>
@@ -132,7 +131,7 @@ export class HistoryItemComponent {
       : 'border-transparent hover:bg-white/10 focus-visible:bg-white/10',
   );
 
-  /** Resolved classes for the history-view card. */
+  /** Resolved classes for the conversations-view card. */
   protected readonly panelClasses = computed(() =>
     this.isSelected()
       ? 'border-secondary bg-secondary-soft'

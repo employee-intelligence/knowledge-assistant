@@ -5,10 +5,10 @@ import { Routes } from '@angular/router';
  * The response view still reads `:id` itself rather than taking a bound input,
  * so it stays in charge of what an unknown id means.
  *
- * `response/:id` addresses one turn by its position in the session, and the bare
- * `response` route follows the newest turn. Both exist because a question sent
- * from the dashboard has no position to put in a URL until the turn exists, and
- * making the id optional avoids inventing one just to navigate.
+ * `response/:id` addresses one conversation by its own id, which never changes,
+ * so the link keeps working however long afterwards it is followed. The bare
+ * `response` route follows the conversation that was last active, which is where
+ * a question sent from the dashboard lands.
  */
 export const routes: Routes = [
   {
@@ -43,11 +43,11 @@ export const routes: Routes = [
       ),
   },
   {
-    path: 'history',
-    title: 'Question history · Internal Knowledge Assistant',
+    path: 'conversations',
+    title: 'Conversations · Internal Knowledge Assistant',
     loadComponent: () =>
-      import('./views/history-view/history-view.component').then(
-        (module) => module.HistoryViewComponent,
+      import('./views/conversations-view/conversations-view.component').then(
+        (module) => module.ConversationsViewComponent,
       ),
   },
   {

@@ -2,10 +2,11 @@ import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 
-import { API_BASE_URL, SESSION_STORAGE_KEY } from '../api.config';
+import { API_BASE_URL } from '../api.config';
+import { ChatStreamEventDto } from '../models/api.model';
 import { ChatService } from './chat.service';
-import { HistoryService } from './history.service';
-import { SessionService } from './session.service';
+import { ConversationService } from './conversation.service';
+import { IdentityService } from './identity.service';
 
 /** A citation as the backend sends one. */
 const SOURCE = {
@@ -15,452 +16,645 @@ const SOURCE = {
   score: 0.82,
 };
 
-describe('ChatService', () => {
-  let chat: ChatService;
-  let history: HistoryService;
-  let session: SessionService;
-  let http: HttpTestingController;
+/** One request the streaming stub was asked to make. */
+interface StreamRequest {
+  url: string;
+  body: { client_id: string; content: string };
+}
+
+/** The wire shape of a conversation list response, as the refresh test serves it. */
+interface ConversationListPayload {
+  conversations: { id: string; title: string | null; updated_at: string }[];
+}
 
 /**
-   * Injects the service with a stored session whose history has landed, which is
-   * the settled state an ask normally starts from.
+ * Lets the pending microtasks run.
+ *
+ * The stream is read through `fetch`, so an answer reaches the service a few
+ * ticks after the test pushes it rather than in the same turn. Every assertion
+ * made after answering goes through here.
+ */
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 5; i += 1) {
+    await Promise.resolve();
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+};
+
+describe('ChatService', () => {
+  let chat: ChatService;
+  let conversations: ConversationService;
+  let http: HttpTestingController;
+
+  /** The client id this suite sends, read from the one place that mints it. */
+  let clientId: string;
+
+  /** Every request made to the streaming endpoint, oldest first. */
+  let streamRequests: StreamRequest[] = [];
+
+  /** The live stream, so a test can push events and close it. */
+  let pushEvent: (event: ChatStreamEventDto) => void = () => undefined;
+  let closeStream: () => void = () => undefined;
+
+  /** The URL the list is fetched from, which names the client. */
+  const listUrl = (): string => `${API_BASE_URL}/api/conversations?client_id=${clientId}`;
+
+  /** The list a restored browser has, reused where a refresh is served. */
+  const RESTORED_LIST: ConversationListPayload = {
+    conversations: [
+      { id: 'conv-1', title: 'Annual leave', updated_at: '2026-09-30T09:00:00' },
+      { id: 'conv-2', title: 'Expenses', updated_at: '2026-09-28T09:00:00' },
+    ],
+  };
+
+  /**
+   * Replaces `fetch` with a stub that serves the messages endpoint.
+   *
+   * The real endpoint sends server-sent events over a chunked body, so the stub
+   * exposes the same shape: a response whose body the test writes to and closes.
+   * That is what lets a test assert that the answer is on screen before the stream
+   * has finished, which is the whole point of streaming.
    */
-  const givenSettledSession = (): void => {
-    injectService();
-    http.expectOne(`${API_BASE_URL}/history/sess-1234`).flush([]);
-  };
-
-  /** Injects the service, which restores the history of a session already stored. */
-  const injectService = (): HttpTestingController => {
-    chat = TestBed.inject(ChatService);
-    history = TestBed.inject(HistoryService);
-    session = TestBed.inject(SessionService);
-    http = TestBed.inject(HttpTestingController);
-
-    return http;
-  };
-
-  /** Puts a live session in storage, as a reload of an active browser finds one. */
-  const givenStoredSession = (): void => {
-    sessionStorage.setItem(
-      SESSION_STORAGE_KEY,
-      JSON.stringify({ id: 'sess-1234', expiresAt: Date.now() + 3_600_000 }),
-    );
-  };
-
-  /** Answers the session creation the first question triggers. */
-  const openSession = (): void => {
-    http.expectOne(`${API_BASE_URL}/sessions`).flush({
-      session_id: 'sess-1234',
-      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
-    });
-  };
-
-  /** The response a question gets back. */
-  const answerTheQuestion = (body: Record<string, unknown>): void => {
-    http.expectOne(`${API_BASE_URL}/chat`).flush(body);
-  };
-
   beforeEach(() => {
-    sessionStorage.clear();
+    streamRequests = [];
 
-    // A browser that has asked something before, which is the state most of these
-    // start from. Tests that care about the very first visit set their own.
-    givenStoredSession();
+    vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+      streamRequests.push({ url, body: JSON.parse(String(init?.body)) });
 
-    // Configured but deliberately not injected: the services load on
-    // construction, so each test chooses when that happens.
+      return new Promise<Response>((resolve) => {
+        const encoder = new TextEncoder();
+        let controller!: ReadableStreamDefaultController<Uint8Array>;
+        const body = new ReadableStream<Uint8Array>({
+          start(streamController) {
+            controller = streamController;
+          },
+        });
+
+        pushEvent = (event) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        };
+        closeStream = () => controller.close();
+
+        resolve(new Response(body, { status: 200 }));
+      });
+    });
+
     TestBed.configureTestingModule({
       providers: [provideHttpClient(), provideHttpClientTesting()],
     });
+
+    // Injecting the chat service constructs the conversation service, which
+    // fetches this browser's list. The client id has to be read first, because
+    // that request is already on its way by the time anything can be flushed.
+    clientId = TestBed.inject(IdentityService).clientId();
+    chat = TestBed.inject(ChatService);
+    conversations = TestBed.inject(ConversationService);
+    http = TestBed.inject(HttpTestingController);
   });
 
   afterEach(() => {
-    http?.verify();
-    sessionStorage.clear();
+    http.verify();
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * Answers the initial list load with a browser that already has conversations,
+   * and loads the first one's thread.
+   */
+  const givenRestoredConversations = (): void => {
+    http.expectOne(listUrl()).flush(RESTORED_LIST);
+
+    http.expectOne(`${API_BASE_URL}/api/conversations/conv-1?client_id=${clientId}`).flush({
+      id: 'conv-1',
+      title: 'Annual leave',
+      messages: [
+        {
+          id: 'm1',
+          role: 'user',
+          content: 'How much leave do I have?',
+          sources: null,
+          created_at: '2026-09-30T09:00:00',
+        },
+        {
+          id: 'm2',
+          role: 'assistant',
+          content: 'Twenty days.',
+          sources: [SOURCE],
+          created_at: '2026-09-30T09:00:01',
+        },
+      ],
+    });
+  };
+
+  /**
+   * Answers the list re-read that follows a completed answer, when the test does
+   * not care what the corrected list contains.
+   */
+  const flushSummaryRefresh = (payload: ConversationListPayload = RESTORED_LIST): void => {
+    http.expectOne(listUrl()).flush(payload);
+  };
+
+  /**
+   * Answers the initial list load for a browser with nothing yet, and the one
+   * conversation created so a question has somewhere to go.
+   */
+  const givenFreshClient = (): void => {
+    http.expectOne(listUrl()).flush({ conversations: [] });
+    http.expectOne(`${API_BASE_URL}/api/conversations`).flush({
+      id: 'conv-new',
+      title: null,
+      created_at: '2026-09-30T09:00:00',
+    });
+  };
+
+  /** Pushes a finished answer and closes the stream. */
+  const streamAnswer = async (
+    answer: string,
+    answered = true,
+    sources: unknown[] = [],
+  ): Promise<void> => {
+    pushEvent({
+      type: 'done',
+      answer,
+      answered,
+      sources: sources as never,
+    });
+    closeStream();
+    await settle();
+  };
+
+  /** The messages of the open conversation, oldest first. */
+  const messages = () => chat.messages();
+
+  describe('the thread it restores', () => {
+    it('opens the most recent conversation rather than an empty one', () => {
+      givenRestoredConversations();
+
+      // The list is the backend's, ordered by when each conversation was last
+      // active, and a reload is not a reason to start a new one.
+      expect(chat.activeConversationId()).toBe('conv-1');
+      expect(chat.hasMessages()).toBe(true);
+      expect(chat.threadTitle()).toBe('Annual leave');
+    });
+
+    it('reports an empty conversation as empty rather than as missing', () => {
+      http.expectOne(listUrl()).flush({ conversations: [] });
+      http.expectOne(`${API_BASE_URL}/api/conversations`).flush({
+        id: 'conv-new',
+        title: null,
+        created_at: '2026-09-30T09:00:00',
+      });
+
+      // The first visit lands here: a conversation waiting for its first question,
+      // which is not an error and must not be reported as a missing conversation.
+      expect(chat.isEmpty()).toBe(true);
+      expect(chat.threadTitle()).toBe('New conversation');
+    });
+
+    it('stays resolving while the list is on its way', () => {
+      expect(chat.isResolving()).toBe(true);
+
+      http.expectOne(listUrl()).flush({ conversations: [] });
+      http.expectOne(`${API_BASE_URL}/api/conversations`).flush({
+        id: 'conv-new',
+        title: null,
+        created_at: '2026-09-30T09:00:00',
+      });
+
+      expect(chat.isResolving()).toBe(false);
+    });
   });
 
   describe('asking', () => {
-    beforeEach(givenSettledSession);
+    it('records the question and a pending answer before the request goes out', () => {
+      givenRestoredConversations();
 
-    it('posts the question under the session id the backend issued', () => {
+      chat.ask('Can I carry it over?');
+
+      // Shown straight away rather than after a round trip that can take a minute.
+      expect(messages().map((message) => message.role)).toEqual([
+        'user',
+        'assistant',
+        'user',
+        'assistant',
+      ]);
+      expect(messages().at(-2)?.text).toBe('Can I carry it over?');
+      expect(messages().at(-1)?.status).toBe('pending');
+      expect(chat.isLoading()).toBe(true);
+
+      // The list is re-read once the answer lands, so the completed stream here is
+      // only what the request itself asked for.
+      expect(streamRequests).toEqual([
+        {
+          url: `${API_BASE_URL}/api/conversations/conv-1/messages`,
+          body: { client_id: clientId, content: 'Can I carry it over?' },
+        },
+      ]);
+    });
+
+    it('waits for a conversation instead of dropping a question asked on arrival', async () => {
+      // Nothing flushed yet: the list is still in flight, so there is no
+      // conversation to add a message to.
       chat.ask('How much annual leave do I have?');
 
-      const request = http.expectOne(`${API_BASE_URL}/chat`);
+      expect(streamRequests).toEqual([]);
+      expect(messages()).toEqual([]);
 
-      expect(request.request.method).toBe('POST');
-      expect(request.request.body).toEqual({
-        session_id: 'sess-1234',
-        question: 'How much annual leave do I have?',
-      });
+      givenFreshClient();
+      await settle();
 
-      request.flush({ answer: 'Twenty days.', answered: true, sources: [] });
-    });
-
-    it('shows the question and a pending answer before the request is sent', () => {
-      chat.ask('How much leave?');
-
-      // Feedback lands on submit, not after the round trip.
-      expect(chat.hasMessages()).toBe(true);
-      expect(chat.messages().map((message) => [message.role, message.status])).toEqual([
-        ['user', 'pending'],
-        ['assistant', 'pending'],
+      // The question asked before the app knew which conversation it was being
+      // added to is asked now, rather than silently lost. This is the first thing
+      // anyone does on a first visit, so losing it loses the first question.
+      expect(streamRequests.map((request) => request.body.content)).toEqual([
+        'How much annual leave do I have?',
       ]);
-      expect(chat.isLoading()).toBe(true);
-
-      answerTheQuestion({ answer: 'Twenty days.', answered: true, sources: [] });
+      expect(messages().at(-2)?.text).toBe('How much annual leave do I have?');
     });
 
-    it('renders the answer and its citations once they arrive', () => {
-      chat.ask('How much leave?');
-      answerTheQuestion({
-        answer: 'Twenty days per year.',
-        answered: true,
-        sources: [SOURCE, { ...SOURCE, document: 'Staff Handbook' }],
-      });
+    it('sends a follow-up to the conversation it belongs to', () => {
+      givenRestoredConversations();
 
-      const [question, answer] = chat.messages();
+      chat.ask('Can I carry it over?');
 
-      expect(question.text).toBe('How much leave?');
-      expect(question.sources).toEqual([]);
-      expect(answer.text).toBe('Twenty days per year.');
-      expect(answer.status).toBe('answered');
-      expect(answer.sources).toHaveLength(2);
-      // Distinct documents, so one heavily quoted policy is not counted twice.
-      expect(answer.documentCount).toBe(2);
-      expect(chat.isLoading()).toBe(false);
+      // The same conversation, not a new one. This is the single decision that
+      // makes a follow-up a follow-up.
+      expect(chat.activeConversationId()).toBe('conv-1');
+      expect(streamRequests[0].url).toBe(`${API_BASE_URL}/api/conversations/conv-1/messages`);
+      // And no request for a conversation is made, because sending never creates
+      // one.
+      http.expectNone(`${API_BASE_URL}/api/conversations`);
     });
 
-    it('renders an unanswered response as a gap, not as a failure', () => {
-      chat.ask('What is the office plant policy?');
-      answerTheQuestion({ answer: 'No mention of that.', answered: false, sources: [] });
+    it('keeps the restored messages and adds to them', () => {
+      givenRestoredConversations();
 
-      expect(chat.messages()[1].status).toBe('not-found');
+      chat.ask('Can I carry it over?');
+
+      // The earlier exchange is the backend's, and the new one is local, in the
+      // same thread, in order.
+      expect(messages().slice(0, 2).map((message) => message.id)).toEqual(['m1', 'm2']);
     });
 
-    it('refuses a blank question without spending a request', () => {
+    it('ignores a question with no words in it', () => {
+      givenRestoredConversations();
+
       chat.ask('   ');
 
-      expect(chat.hasMessages()).toBe(false);
-      http.expectNone(`${API_BASE_URL}/chat`);
-    });
-
-    it('keeps the composer usable when a request fails', () => {
-      chat.ask('How much leave?');
-      http
-        .expectOne(`${API_BASE_URL}/chat`)
-        .flush('Internal Server Error', { status: 500, statusText: 'Server Error' });
-
-      // A stuck busy state would disable the composer for the rest of the session.
-      expect(chat.isLoading()).toBe(false);
-      expect(chat.messages()[1].status).toBe('failed');
-      expect(chat.messages()[1].text).toContain('temporarily unavailable');
-    });
-
-    it('nudges toward rephrasing when the backend rejected the question itself', () => {
-      chat.ask('Hi');
-      http
-        .expectOne(`${API_BASE_URL}/chat`)
-        .flush(
-          { detail: [{ loc: ['body', 'question'], msg: 'too short', type: 'string_too_short' }] },
-          { status: 422, statusText: 'Unprocessable Entity' },
-        );
-
-      expect(chat.messages()[1].status).toBe('failed');
-      expect(chat.messages()[1].text).toContain('Try rephrasing your question');
+      expect(streamRequests).toEqual([]);
+      expect(messages()).toHaveLength(2);
     });
   });
 
-  describe('a session that has expired', () => {
-    beforeEach(givenSettledSession);
+  describe('streaming an answer', () => {
+    it('writes the answer out as it arrives, before the stream ends', async () => {
+      givenRestoredConversations();
 
-    /**
-     * The backend answers a question it will not accept with a 200 rather than a
-     * status the client can branch on, so this is the only signal it gets.
-     */
-    const SESSION_GONE = {
-      answer: 'Session expired or invalid. Please create a new session.',
-      answered: false,
-      sources: [],
+      chat.ask('Can I carry it over?');
+      pushEvent({ type: 'status', stage: 'writing' });
+      pushEvent({ type: 'delta', text: 'Yes, ' });
+      pushEvent({ type: 'delta', text: 'up to five days.' });
+      await settle();
+
+      // The question is already in the thread with a growing answer behind it.
+      expect(messages().at(-1)?.text).toBe('Yes, up to five days.');
+      expect(chat.isLoading()).toBe(true);
+    });
+
+    it('shows that the answer is being written, and stops doing so at the first words', async () => {
+      givenRestoredConversations();
+
+      chat.ask('Can I carry it over?');
+
+      // The model works before its first word. Without this the thread would sit
+      // on a spinner for all of it.
+      expect(chat.isPreparing()).toBe(false);
+
+      pushEvent({ type: 'status', stage: 'writing' });
+      await settle();
+      expect(chat.isPreparing()).toBe(true);
+
+      // First words supersede it: the answer is now visibly arriving.
+      pushEvent({ type: 'delta', text: 'Yes' });
+      await settle();
+      expect(chat.isPreparing()).toBe(false);
+    });
+
+    it('settles the message on the closing event, which is the authority', async () => {
+      givenRestoredConversations();
+
+      chat.ask('Can I carry it over?');
+      pushEvent({ type: 'delta', text: 'Yes' });
+      await streamAnswer('Yes, up to five days.', true, [SOURCE]);
+      flushSummaryRefresh();
+
+      const answer = messages().at(-1);
+
+      expect(answer?.text).toBe('Yes, up to five days.');
+      expect(answer?.status).toBe('answered');
+      // Citations arrive with the finished answer, never before it, so the
+      // citation block is never shown beside a half-written answer.
+      expect(answer?.sources).toEqual([SOURCE]);
+      expect(answer?.documentCount).toBe(1);
+      expect(chat.isLoading()).toBe(false);
+      expect(chat.isPreparing()).toBe(false);
+    });
+
+    it('treats an unanswered question as a gap in the corpus, not a failure', async () => {
+      givenRestoredConversations();
+
+      chat.ask('What is the wifi password?');
+      await streamAnswer('I could not find that in the documents.', false);
+      flushSummaryRefresh();
+
+      // "Not in the documents" is a confident statement about the corpus, and there
+      // is nothing to retry about it.
+      expect(messages().at(-1)?.status).toBe('not-found');
+      expect(chat.isLoading()).toBe(false);
+    });
+
+    it('fails the message when the stream ends without a closing event', async () => {
+      givenRestoredConversations();
+
+      chat.ask('Can I carry it over?');
+      pushEvent({ type: 'delta', text: 'Yes, up to' });
+      closeStream();
+      await settle();
+
+      // A connection dropped part way through has produced no answer at all.
+      // Reporting that as "not found in the documents" would blame the corpus for
+      // a dropped connection, and there would be nothing left to retry.
+      expect(messages().at(-1)?.status).toBe('failed');
+      expect(messages().at(-1)?.text).toContain('interrupted');
+      expect(chat.isLoading()).toBe(false);
+    });
+
+    it('fails the message when the stream says the assistant failed', async () => {
+      givenRestoredConversations();
+
+      chat.ask('Can I carry it over?');
+      pushEvent({
+        type: 'error',
+        detail: 'The assistant is temporarily unavailable. Please try again.',
+      });
+      closeStream();
+      await settle();
+
+      // The backend cannot answer with a status once the stream has opened, so the
+      // failure travels as an event and reads the same way on screen.
+      expect(messages().at(-1)?.status).toBe('failed');
+      expect(messages().at(-1)?.text).toBe(
+        'The assistant is temporarily unavailable. Please try again.',
+      );
+    });
+
+    it('names the conversation from the title event, in the list and the header', async () => {
+      http.expectOne(listUrl()).flush({
+        conversations: [{ id: 'conv-1', title: null, updated_at: '2026-09-30T09:00:00' }],
+      });
+      http.expectOne(`${API_BASE_URL}/api/conversations/conv-1?client_id=${clientId}`).flush({
+        id: 'conv-1',
+        title: null,
+        messages: [],
+      });
+
+      chat.ask('How much annual leave do I have?');
+      pushEvent({ type: 'done', answer: 'Twenty days.', answered: true, sources: [] });
+      pushEvent({ type: 'title', title: 'Annual leave allowance' });
+      closeStream();
+      await settle();
+
+      // The completion also re-reads the list, which now carries the title the
+      // backend stored.
+      flushSummaryRefresh({
+        conversations: [
+          { id: 'conv-1', title: 'Annual leave allowance', updated_at: '2026-09-30T09:30:00' },
+        ],
+      });
+
+      // The title arrives after the answer, because naming is a second model call
+      // that runs beside the first answer rather than in front of it. It is applied
+      // wherever the conversation is named, so the sidebar and the header agree.
+      expect(chat.threadTitle()).toBe('Annual leave allowance');
+      expect(conversations.conversations()[0].title).toBe('Annual leave allowance');
+    });
+
+    it('re-reads the list once an answer lands, so the conversation moves up it', async () => {
+      givenRestoredConversations();
+
+      chat.ask('Can I carry it over?');
+      await streamAnswer('Yes, up to five days.');
+
+      // Answering stamps the conversation as active, and the list is ordered by
+      // that. Left alone, a conversation answered now would stay at the bottom of
+      // the sidebar until the next reload.
+      http.expectOne(listUrl()).flush({
+        conversations: [
+          { id: 'conv-1', title: 'Annual leave', updated_at: '2026-09-30T09:30:00' },
+          { id: 'conv-2', title: 'Expenses', updated_at: '2026-09-28T09:00:00' },
+        ],
+      });
+
+      expect(conversations.conversations()[0].id).toBe('conv-1');
+    });
+  });
+
+  describe('retrying', () => {
+    /** Puts a failed exchange at the end of the open thread. */
+    const givenFailedExchange = async (): Promise<string> => {
+      givenRestoredConversations();
+
+      chat.ask('Can I carry it over?');
+      pushEvent({ type: 'error', detail: 'The assistant is temporarily unavailable.' });
+      closeStream();
+      await settle();
+
+      return messages().at(-1)?.id ?? '';
     };
 
-    it('reports the expiry instead of showing the question as unanswerable', () => {
-      chat.ask('How much leave?');
-      answerTheQuestion(SESSION_GONE);
+    it('asks the question again in place of the failure, not under it', async () => {
+      const failedId = await givenFailedExchange();
 
-      // Told the session is gone, which is what happened. Reading this as a gap in
-      // the documents would have claimed the question was never answerable.
-      expect(chat.sessionExpired()).toBe(true);
+      chat.retry(failedId);
+
+      // A second copy of the question under a failure that is being retried would
+      // leave the reader looking at a card for something already asked again. The
+      // retried exchange takes the same place in the thread.
+      expect(messages().map((message) => message.role)).toEqual([
+        'user',
+        'assistant',
+        'user',
+        'assistant',
+      ]);
+      expect(messages().at(-2)?.text).toBe('Can I carry it over?');
+      expect(messages().at(-1)?.status).toBe('pending');
+      expect(streamRequests.map((request) => request.body.content)).toEqual([
+        'Can I carry it over?',
+        'Can I carry it over?',
+      ]);
+    });
+
+    it('leaves the rest of the thread alone', async () => {
+      const failedId = await givenFailedExchange();
+
+      chat.retry(failedId);
+
+      // The restored exchange is still the first thing in the thread.
+      expect(messages().slice(0, 2).map((message) => message.id)).toEqual(['m1', 'm2']);
+    });
+
+    it('does nothing while a question is already in flight', async () => {
+      const failedId = await givenFailedExchange();
+
+      chat.ask('Something else');
+      const before = messages().length;
+
+      chat.retry(failedId);
+
+      // One answer at a time. A second request would interleave two streams into
+      // one thread and leave the reader with two half-answers.
+      expect(messages()).toHaveLength(before);
+      expect(streamRequests).toHaveLength(2);
+    });
+
+    it('ignores a message that is not in the open thread', () => {
+      givenRestoredConversations();
+
+      chat.retry('not-a-message');
+
+      expect(streamRequests).toEqual([]);
+    });
+
+    it('asks a question that is not the one above a message', async () => {
+      http.expectOne(listUrl()).flush({
+        conversations: [{ id: 'conv-1', title: 'Leave', updated_at: '2026-09-30T09:00:00' }],
+      });
+      http.expectOne(`${API_BASE_URL}/api/conversations/conv-1?client_id=${clientId}`).flush({
+        id: 'conv-1',
+        title: 'Leave',
+        messages: [
+          { id: 'm1', role: 'user', content: 'First?', sources: null, created_at: '2026-09-30T09:00:00' },
+          { id: 'm2', role: 'assistant', content: 'Yes.', sources: [], created_at: '2026-09-30T09:00:01' },
+          { id: 'm3', role: 'user', content: 'Second?', sources: null, created_at: '2026-09-30T09:00:02' },
+          { id: 'm4', role: 'assistant', content: 'No.', sources: [], created_at: '2026-09-30T09:00:03' },
+        ],
+      });
+
+      chat.retry('m4');
+
+      // The question is the message before it, which is the relationship the
+      // backend stores as well, so this holds for a thread it sent.
+      expect(streamRequests.map((request) => request.body.content)).toEqual(['Second?']);
+    });
+  });
+
+  describe('starting and opening conversations', () => {
+    it('creates a real conversation rather than pointing back at the current thread', () => {
+      givenRestoredConversations();
+
+      chat.startNewConversation();
+
+      const request = http.expectOne(`${API_BASE_URL}/api/conversations`);
+
+      expect(request.request.body).toEqual({ client_id: clientId });
+      request.flush({ id: 'conv-3', title: null, created_at: '2026-09-30T10:00:00' });
+
+      // The conversation it left behind stays in the sidebar. That is the whole
+      // point of conversations outliving the question that started them.
+      expect(conversations.conversations().map((item) => item.id)).toEqual([
+        'conv-3',
+        'conv-1',
+        'conv-2',
+      ]);
+      expect(chat.activeConversationId()).toBe('conv-3');
       expect(chat.isEmpty()).toBe(true);
     });
 
-    it('does not file the unasked question as a failed turn', () => {
-      chat.ask('How much leave?');
-      answerTheQuestion(SESSION_GONE);
+    it('opens an existing conversation and loads its thread', () => {
+      givenRestoredConversations();
 
-      // Every turn in the thread was filed under the dead id, so the view shows
-      // the expiry rather than a card the user could only retry into the same
-      // closed session.
-      expect(chat.messages()).toEqual([]);
-      expect(chat.isLoading()).toBe(false);
-    });
+      chat.openConversation('conv-2');
 
-    it('retires the dead id so a new conversation opens a fresh session', () => {
-      chat.ask('How much leave?');
-      answerTheQuestion(SESSION_GONE);
+      const request = http.expectOne(`${API_BASE_URL}/api/conversations/conv-2?client_id=${clientId}`);
 
-      expect(session.sessionId()).toBeNull();
-      expect(sessionStorage.getItem(SESSION_STORAGE_KEY)).toBeNull();
-
-      chat.startNewConversation();
-      chat.ask('A new question?');
-
-      http.expectOne(`${API_BASE_URL}/sessions`).flush({
-        session_id: 'sess-5678',
-        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      expect(request.request.method).toBe('GET');
+      request.flush({
+        id: 'conv-2',
+        title: 'Expenses',
+        messages: [
+          { id: 'e1', role: 'user', content: 'Mileage?', sources: null, created_at: '2026-09-28T09:00:00' },
+          { id: 'e2', role: 'assistant', content: 'Forty pence.', sources: [], created_at: '2026-09-28T09:00:01' },
+        ],
       });
 
-      const asked = http.expectOne(`${API_BASE_URL}/chat`);
-
-      expect(asked.request.body).toEqual({ session_id: 'sess-5678', question: 'A new question?' });
-      asked.flush({ answer: 'A new answer.', answered: true, sources: [] });
+      expect(chat.activeConversationId()).toBe('conv-2');
+      expect(messages().map((message) => message.id)).toEqual(['e1', 'e2']);
     });
 
-    it('reports the expiry when the backend rejects the session with a status', () => {
-      chat.ask('How much leave?');
+    it('keeps a conversation the route opened before the list arrived', () => {
+      // A refresh on /response/:id opens the named conversation as soon as the id
+      // is known, which can be before the sidebar's list has come back. The list
+      // must not then replace it with the most recent one, which is a different
+      // conversation and would read as the refresh having lost the thread.
+      chat.openConversation('conv-2');
+
+      http.expectOne(`${API_BASE_URL}/api/conversations/conv-2?client_id=${clientId}`).flush({
+        id: 'conv-2',
+        title: 'Expenses',
+        messages: [
+          { id: 'e1', role: 'user', content: 'Mileage?', sources: null, created_at: '2026-09-28T09:00:00' },
+        ],
+      });
+
+      http.expectOne(listUrl()).flush(RESTORED_LIST);
+
+      expect(chat.activeConversationId()).toBe('conv-2');
+      expect(messages().map((message) => message.id)).toEqual(['e1']);
+    });
+
+    it('reports a conversation that is not there as missing rather than empty', () => {
+      givenRestoredConversations();
+
+      chat.openConversation('gone');
       http
-        .expectOne(`${API_BASE_URL}/chat`)
-        .flush('Unauthorized', { status: 401, statusText: 'Unauthorized' });
+        .expectOne(`${API_BASE_URL}/api/conversations/gone?client_id=${clientId}`)
+        .flush({ detail: 'Not Found' }, { status: 404, statusText: 'Not Found' });
 
-      expect(chat.sessionExpired()).toBe(true);
-      expect(chat.messages()).toEqual([]);
+      // It leaves the list, which is the list's own recovery, and the open
+      // conversation is reported as gone. An empty thread would read as a
+      // conversation that lost its history, which is the opposite of what happened.
+      expect(conversations.conversations().map((item) => item.id)).toEqual(['conv-1', 'conv-2']);
+      expect(chat.isMissing()).toBe(true);
     });
 
-    it('keeps a genuine gap in the documents out of the expiry path', () => {
-      chat.ask('What is the office plant policy?');
-      answerTheQuestion({ answer: 'No mention of that.', answered: false, sources: [] });
+    it('discards a thread that arrives for a conversation the user has left', () => {
+      givenRestoredConversations();
 
-      // The same `answered: false` the backend uses for a dead session, but a real
-      // answer about the corpus. Retiring the session here would discard a
-      // conversation the user is still in the middle of.
-      expect(chat.sessionExpired()).toBe(false);
-      expect(chat.messages()[1].status).toBe('not-found');
-      expect(session.sessionId()).toBe('sess-1234');
-    });
-  });
+      chat.openConversation('conv-2');
+      const slow = http.expectOne(`${API_BASE_URL}/api/conversations/conv-2?client_id=${clientId}`);
 
-  describe('a conversation of several turns', () => {
-    beforeEach(() => {
-      givenSettledSession();
-
-      chat.ask('First?');
-      answerTheQuestion({ answer: 'First answer.', answered: true, sources: [] });
-      chat.ask('Second?');
-      answerTheQuestion({ answer: 'Second answer.', answered: true, sources: [] });
-    });
-
-    it('follows the newest turn when no id is asked for', () => {
-      chat.openTurn(null);
-
-      expect(chat.activeTurnId()).toBe('1');
-      expect(chat.threadTitle()).toBe('Second?');
-    });
-
-    it('asks every question in the conversation under one session', () => {
-      // The whole conversation shares a session. A fresh one per question would
-      // file each turn under its own id, so `/history` would only ever hold the
-      // last question asked and the sidebar would empty itself after every ask.
-      http.expectNone(`${API_BASE_URL}/sessions`);
-
-      chat.ask('Third?');
-      const request = http.expectOne(`${API_BASE_URL}/chat`);
-
-      expect(request.request.body).toEqual({ session_id: 'sess-1234', question: 'Third?' });
-      request.flush({ answer: 'Third answer.', answered: true, sources: [] });
-      http.expectNone(`${API_BASE_URL}/sessions`);
-
-      expect(session.sessionId()).toBe('sess-1234');
-    });
-
-    it('shows the conversation that led to an older turn, not a bare answer', () => {
-      chat.openTurn('0');
-
-      expect(chat.threadTitle()).toBe('First?');
-      expect(chat.messages().map((message) => message.text)).toEqual(['First?', 'First answer.']);
-    });
-
-    it('has nothing to show for an id that is not one of this session turns', () => {
-      chat.openTurn('99');
-
-      expect(chat.hasMessages()).toBe(false);
-      expect(chat.activeTurnId()).toBeNull();
-    });
-
-    it('returns to following the newest turn', () => {
-      chat.openTurn('0');
-      chat.stopFollowing();
-
-      expect(chat.activeTurnId()).toBe('1');
-    });
-
-    it('starts an empty conversation, retiring the session with the turns', () => {
-      // A new conversation is not the same session pointed back at its first
-      // turn. The backend scopes history by session, so keeping it would list the
-      // old conversation's questions in a thread meant to be empty.
-      expect(session.sessionExpired()).toBe(false);
-
-      chat.startNewConversation();
-
-      expect(chat.messages()).toEqual([]);
-      expect(chat.hasMessages()).toBe(false);
-      expect(chat.isEmpty()).toBe(true);
-      // The stored id is gone, so the next question opens a fresh session.
-      expect(session.sessionId()).toBeNull();
-    });
-
-    it('opens a new session for the first question after a new conversation', () => {
-      // The whole point of retiring the session: the next question must not be
-      // filed beside the conversation the user just walked away from.
-      chat.startNewConversation();
-      chat.ask('A new question?');
-
-      const created = http.expectOne(`${API_BASE_URL}/sessions`);
-
-      created.flush({
-        session_id: 'sess-5678',
-        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      // Switched again before the thread arrived, so this one now belongs to a
+      // conversation the user has already left.
+      chat.openConversation('conv-1');
+      http.expectOne(`${API_BASE_URL}/api/conversations/conv-1?client_id=${clientId}`).flush({
+        id: 'conv-1',
+        title: 'Annual leave',
+        messages: [
+          { id: 'm1', role: 'user', content: 'How much leave do I have?', sources: null, created_at: '2026-09-30T09:00:00' },
+        ],
       });
 
-      const asked = http.expectOne(`${API_BASE_URL}/chat`);
-
-      expect(asked.request.body).toEqual({ session_id: 'sess-5678', question: 'A new question?' });
-      asked.flush({ answer: 'A new answer.', answered: true, sources: [] });
-
-      expect(chat.messages().map((message) => message.text)).toEqual([
-        'A new question?',
-        'A new answer.',
-      ]);
-    });
-  });
-
-  describe('retrying a failed turn', () => {
-    beforeEach(() => {
-      givenSettledSession();
-
-      chat.ask('How much leave?');
-      http
-        .expectOne(`${API_BASE_URL}/chat`)
-        .flush('Internal Server Error', { status: 500, statusText: 'Server Error' });
-    });
-
-    it('asks the same question again under the same session', () => {
-      chat.retry('0');
-
-      const request = http.expectOne(`${API_BASE_URL}/chat`);
-
-      expect(request.request.body).toEqual({
-        session_id: 'sess-1234',
-        question: 'How much leave?',
-      });
-      request.flush({ answer: 'Twenty days.', answered: true, sources: [] });
-    });
-
-    it('reuses the turn rather than duplicating it, so its link and row survive', () => {
-      chat.retry('0');
-      answerTheQuestion({ answer: 'Twenty days.', answered: true, sources: [] });
-
-      expect(chat.messages()).toHaveLength(2);
-      expect(chat.activeTurnId()).toBe('0');
-      expect(chat.messages()[1].status).toBe('answered');
-    });
-
-    it('shows the question as pending again while the retry is in flight', () => {
-      chat.retry('0');
-
-      expect(chat.messages()[1].status).toBe('pending');
-      expect(chat.isLoading()).toBe(true);
-
-      answerTheQuestion({ answer: 'Twenty days.', answered: true, sources: [] });
-      expect(chat.isLoading()).toBe(false);
-    });
-
-    it('ignores a retry for a turn that is not there', () => {
-      chat.retry('99');
-
-      http.expectNone(`${API_BASE_URL}/chat`);
-    });
-  });
-
-  it('waits for the session history to land before numbering a new turn', () => {
-    injectService();
-
-    // The history is slow to arrive, so the ask is queued behind it rather than
-    // numbering a turn against a list that is about to land.
-    chat.ask('First?');
-    expect(chat.hasMessages()).toBe(false);
-
-    http.expectOne(`${API_BASE_URL}/history/sess-1234`).flush([
-      {
-        question: 'Older question',
-        answer: 'Older answer.',
-        answered: true,
-        sources: [],
-        created_at: '2026-09-30T08:00:00Z',
-      },
-    ]);
-
-    // A turn needs a session to be posted under, so this is where one opens if
-    // there was not already one, which there was here.
-    http.expectOne(`${API_BASE_URL}/chat`).flush({ answer: 'Yes.', answered: true, sources: [] });
-
-    // Position 1, not 0: the server's turn kept the position it has on reload.
-    expect(chat.activeTurnId()).toBe('1');
-    expect(history.turns().map((turn) => turn.question)).toEqual(['Older question', 'First?']);
-  });
-
-  describe('a browser that has never asked anything', () => {
-    beforeEach(() => sessionStorage.clear());
-
-    it('spends no request at all before the first question', () => {
-      injectService();
-
-      // Nothing stored means no conversation to restore, so the page load opens no
-      // session and fetches no history.
-      http.expectNone(`${API_BASE_URL}/sessions`);
-      http.expectNone(`${API_BASE_URL}/history/sess-1234`);
-    });
-
-    it('opens one session for the first question and keeps it for the rest', () => {
-      injectService();
-      chat.ask('How much leave?');
-
-      const created = http.expectOne(`${API_BASE_URL}/sessions`);
-
-      created.flush({
-        session_id: 'sess-1234',
-        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      slow.flush({
+        id: 'conv-2',
+        title: 'Expenses',
+        messages: [
+          { id: 'e1', role: 'user', content: 'Mileage?', sources: null, created_at: '2026-09-28T09:00:00' },
+        ],
       });
 
-      const first = http.expectOne(`${API_BASE_URL}/chat`);
-
-      expect(first.request.body).toEqual({ session_id: 'sess-1234', question: 'How much leave?' });
-      first.flush({ answer: 'Twenty days.', answered: true, sources: [] });
-
-      chat.ask('And carryover?');
-
-      // One session covers the whole conversation, not one per question.
-      http.expectNone(`${API_BASE_URL}/sessions`);
-      const second = http.expectOne(`${API_BASE_URL}/chat`);
-
-      expect(second.request.body).toEqual({ session_id: 'sess-1234', question: 'And carryover?' });
-      second.flush({ answer: 'Five days.', answered: true, sources: [] });
-
-      expect(chat.messages().map((message) => message.text)).toEqual([
-        'How much leave?',
-        'Twenty days.',
-        'And carryover?',
-        'Five days.',
-      ]);
+      expect(chat.activeConversationId()).toBe('conv-1');
+      expect(messages().map((message) => message.id)).toEqual(['m1']);
     });
   });
 });

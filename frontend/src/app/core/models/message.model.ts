@@ -1,5 +1,3 @@
-import { AnswerStatus } from './question.model';
-
 /**
  * A single citation backing an answer. Answers are grounded in documents, so the
  * sources travel with the message rather than being looked up separately.
@@ -20,28 +18,19 @@ export interface SourceReference {
 }
 
 /**
- * Lifecycle of a single turn. Shared with `AnswerStatus` so a message and the
- * history row describing it can never disagree about what happened.
+ * Outcome of a single message.
+ *
+ * `failed` is a transport outcome rather than an answer outcome: the assistant
+ * never got to answer. It is kept distinct from `not-found`, which is the
+ * assistant reporting that the corpus genuinely has nothing, because the two
+ * need different wording and different recovery.
  */
-export type MessageStatus = AnswerStatus;
+export type AnswerStatus = 'pending' | 'answered' | 'not-found' | 'failed';
 
 /** Who produced a message. */
 export type MessageRole = 'user' | 'assistant';
 
-/**
- * Payload returned by the assistant for a single question.
- *
- * The citation count is not carried here. It is derived from `sources` wherever
- * it is needed, so there is one derivation of it rather than a number that can
- * disagree with the list it was counted from.
- */
-export interface AnswerResponse {
-  text: string;
-  status: MessageStatus;
-  sources: SourceReference[];
-}
-
-/** One turn in a conversation thread. */
+/** One message in a conversation thread. */
 export interface Message {
   id: string;
   role: MessageRole;
@@ -53,8 +42,20 @@ export interface Message {
    */
   text: string;
   createdAt: string;
-  status: MessageStatus;
-  /** Populated for answered turns; empty for pending, not-found and failed turns. */
+  status: AnswerStatus;
+  /** Populated for an answered message; empty for a question and for a failure. */
   sources: SourceReference[];
-  /** Set when the turn is grounded, used for the "Grounded in N documents" hint. */
-  documentCount: number;}
+  /** Set when the message is grounded, used for the "Grounded in N documents" hint. */
+  documentCount: number;
+}
+
+/**
+ * Counts the distinct documents a message's answer draws on.
+ *
+ * Derived wherever it is needed rather than carried on the message, so there is
+ * one derivation of it rather than a number that can disagree with the list it was
+ * counted from.
+ */
+export function countDocuments(sources: SourceReference[]): number {
+  return new Set(sources.map((source) => source.document)).size;
+}

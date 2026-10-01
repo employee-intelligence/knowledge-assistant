@@ -1,8 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, String, Text, create_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, create_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
+
 from app.config import settings
 
 _args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
@@ -14,53 +15,69 @@ class Base(DeclarativeBase):
     pass
 
 
-class Session(Base):
-    __tablename__ = "sessions"
+class Conversation(Base):
+    __tablename__ = "conversations"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(64), index=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    messages: Mapped[list["Message"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="Message.created_at",
+    )
 
 
-class QA(Base):
-    __tablename__ = "history"
+class Message(Base):
+    __tablename__ = "messages"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), index=True)
-    question: Mapped[str] = mapped_column(Text)
-    answer: Mapped[str] = mapped_column(Text)
-    answered: Mapped[bool] = mapped_column(Boolean)
-    sources: Mapped[list] = mapped_column(JSON, default=list)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    sources: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
+    conversation: Mapped["Conversation"] = relationship(back_populates="messages")
 
-def create_session(db: SessionLocal, ttl_minutes: int = 30) -> Session:
-    session = Session(
-        id=uuid4().hex,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes),
-    )
-    db.add(session)
+
+def create_conversation(db: SessionLocal, client_id: str) -> Conversation:
+    conversation = Conversation(id=uuid4().hex, client_id=client_id)
+    db.add(conversation)
     db.commit()
-    db.refresh(session)
-    return session
+    db.refresh(conversation)
+    return conversation
 
 
-def get_valid_session(db: SessionLocal, session_id: str) -> Session | None:
-    session = db.get(Session, session_id)
-    if session is None:
+def get_owned_conversation(
+    db: SessionLocal, conversation_id: str, client_id: str
+) -> Conversation | None:
+    """The conversation, but only if it belongs to the calling client.
+
+    Conversations carry no shared secret, so ownership is the whole boundary:
+    a client that knows an id it does not own is answered exactly like a client
+    that guessed an id that never existed, instead of being told it exists.
+    """
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None or conversation.client_id != client_id:
         return None
-    expires_at = session.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at < datetime.now(timezone.utc):
-        db.delete(session)
-        db.commit()
-        return None
-    return session
+    return conversation
+
+
+def touch(db: SessionLocal, conversation: Conversation) -> None:
+    conversation.updated_at = datetime.now(timezone.utc)
+    db.commit()
 
 
 def init_db() -> None:
