@@ -29,6 +29,16 @@ import { BrandLogoComponent } from '../../../chat/components/brand-logo/brand-lo
           Design preview. Accounts are not connected yet, so nothing you enter is sent anywhere.
         </span>
       </p>
+
+      <!--
+        Spelled as the designs spell it, on both signed-out screens. It is not
+        decoration: it tells a reader that this is an internal system, and it
+        contradicts the registration form sitting above it, which is the
+        contradiction worth settling before the auth service is written.
+      -->
+      <p class="-mt-4 self-center text-center text-xs text-muted-foreground">
+        Protected internal system - SSO enabled
+      </p>
     </div>
   `,
 })
