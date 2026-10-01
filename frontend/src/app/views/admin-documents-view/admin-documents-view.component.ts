@@ -1,9 +1,17 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  computed,
+  inject,
+  signal,
+  viewChild,
+} from '@angular/core';
 
 import { MOCK_DOCUMENTS } from '../../core/data/mock-admin.data';
 import type { PolicyDocument } from '../../core/models/document.model';
 import { ViewerService } from '../../core/services/viewer.service';
 import { AdminAccessRequiredComponent } from '../../features/admin/components/admin-access-required/admin-access-required.component';
+import { DocumentDropzoneComponent } from '../../features/admin/components/document-dropzone/document-dropzone.component';
 import { DocumentTableComponent } from '../../features/admin/components/document-table/document-table.component';
 import { ViewHeaderComponent } from '../../features/chat/components/view-header/view-header.component';
 import { ButtonComponent } from '../../shared/components/button/button.component';
@@ -11,6 +19,7 @@ import { ConfirmDialogComponent } from '../../shared/components/confirm-dialog/c
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { IconComponent } from '../../shared/components/icon/icon.component';
 import { InputComponent } from '../../shared/components/input/input.component';
+import { formatFileSize } from '../../shared/utils/file-size.util';
 
 /**
  * The document inventory. Uploading and deleting are not connected to a server,
@@ -24,6 +33,7 @@ import { InputComponent } from '../../shared/components/input/input.component';
     AdminAccessRequiredComponent,
     ButtonComponent,
     ConfirmDialogComponent,
+    DocumentDropzoneComponent,
     DocumentTableComponent,
     EmptyStateComponent,
     IconComponent,
@@ -46,11 +56,6 @@ import { InputComponent } from '../../shared/components/input/input.component';
                 ariaLabel="Search documents"
               />
             </div>
-
-            <button app-button type="button" (click)="addDocument()">
-              <app-icon name="upload" [size]="16" />
-              <span>Upload document</span>
-            </button>
           </div>
 
           @if (notice()) {
@@ -64,6 +69,10 @@ import { InputComponent } from '../../shared/components/input/input.component';
           }
 
           @if (visibleDocuments().length > 0) {
+            <div class="mt-5">
+              <app-document-dropzone (fileAccepted)="addDocument($event)" />
+            </div>
+
             <p class="mt-5 text-xs text-muted-foreground">{{ summary() }}</p>
 
             <div class="mt-2">
@@ -71,17 +80,14 @@ import { InputComponent } from '../../shared/components/input/input.component';
                 [documents]="visibleDocuments()"
                 (deleteRequested)="askToDelete($event)"
                 (retryRequested)="retry($event)"
+                (renamed)="applyRename($event)"
               />
             </div>
           } @else {
             <div class="mt-5 rounded-lg border border-border bg-card py-6">
-              <app-empty-state
-                icon="file-plus"
-                [title]="emptyTitle()"
-                [message]="emptyMessage()"
-              >
+              <app-empty-state icon="file-plus" [title]="emptyTitle()" [message]="emptyMessage()">
                 @if (search() === '') {
-                  <button app-button type="button" (click)="addDocument()">
+                  <button app-button type="button" (click)="dropzone()?.browse()">
                     <app-icon name="upload" [size]="16" />
                     <span>Upload a document</span>
                   </button>
@@ -116,6 +122,9 @@ export class AdminDocumentsViewComponent {
 
   /** The placeholder inventory, copied so deletes only affect this screen. */
   private readonly documentsState = signal<PolicyDocument[]>([...MOCK_DOCUMENTS]);
+
+  /** The upload panel, so the empty state can open its file picker. */
+  private readonly dropzone = viewChild(DocumentDropzoneComponent);
 
   /** Current search term. */
   protected readonly search = signal('');
@@ -155,16 +164,25 @@ export class AdminDocumentsViewComponent {
       : 'Try a different title or category.',
   );
 
-  /** One line above the table, counting what is in the knowledge base. */
+  /**
+   * One line above the table, counting what is listed and what is still running.
+   *
+   * Wording it as "showing N of M" keeps the searchable list honest when a search
+   * narrows it, which a bare total would not.
+   */
   protected readonly summary = computed(() => {
     const total = this.documentsState().length;
+    const shown = this.visibleDocuments().length;
     const indexing = this.documentsState().filter(
       (document) => document.status === 'processing',
     ).length;
 
-    return indexing === 0
-      ? `${total} document${total === 1 ? '' : 's'}, all indexed`
-      : `${total} documents, ${indexing} still indexing`;
+    const count =
+      shown === total
+        ? `Showing ${total} document${total === 1 ? '' : 's'}`
+        : `Showing ${shown} of ${total} documents`;
+
+    return indexing === 0 ? `${count}, all indexed` : `${count}, ${indexing} still indexing`;
   });
 
   /** What the confirmation dialog is about to do. */
@@ -207,22 +225,49 @@ export class AdminDocumentsViewComponent {
     this.notice.set(`${document.title} was re-indexed in the preview list only.`);
   }
 
-  /** Adds a placeholder document, since there is no upload endpoint yet. */
-  protected addDocument(): void {
-    this.notice.set('');
+  /**
+   * Adds the chosen file to the preview list, as a document still being indexed.
+   *
+   * The file's own name and size are used, so the row is the file. It arrives as
+   * processing rather than indexed because that is the state an upload passes
+   * through, and the notice says where the bytes went: nowhere.
+   */
+  protected addDocument(file: File): void {
+    const now = new Date().toISOString();
+
     this.documentsState.update((documents) => [
       {
-        id: `doc-placeholder-${documents.length + 1}`,
-        title: 'New policy document.pdf',
+        id: `doc-upload-${documents.length + 1}`,
+        title: file.name,
         category: 'Uncategorised',
-        status: 'indexed',
-        sizeLabel: '0 KB',
+        status: 'processing' as const,
+        sizeLabel: formatFileSize(file.size),
         sectionCount: 0,
-        updatedAt: new Date().toISOString(),
+        uploadedAt: now,
+        updatedAt: now,
         updatedBy: this.viewer.viewer().name,
       },
       ...documents,
     ]);
-    this.notice.set('Upload is not connected to a server, so a placeholder row was added.');
+    this.notice.set(
+      `${file.name} was added to the preview list only: uploads are not connected to a server, so nothing was transmitted.`,
+    );
+  }
+
+  /**
+   * Applies a new title to a document in the preview list.
+   *
+   * Real, because the title is the only part of a document an administrator can
+   * change without a file, and a control that could not do it would be decoration.
+   */
+  protected applyRename(change: { document: PolicyDocument; title: string }): void {
+    this.documentsState.update((documents) =>
+      documents.map((candidate) =>
+        candidate.id === change.document.id
+          ? { ...candidate, title: change.title, updatedAt: new Date().toISOString() }
+          : candidate,
+      ),
+    );
+    this.notice.set(`${change.document.title} was renamed in the preview list only.`);
   }
 }

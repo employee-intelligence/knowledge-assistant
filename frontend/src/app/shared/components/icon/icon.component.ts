@@ -16,6 +16,7 @@ export type IconName =
   | 'more-horizontal'
   | 'panel-left'
   | 'paperclip'
+  | 'pencil'
   | 'plus'
   | 'search'
   | 'search-x'
@@ -149,6 +150,12 @@ const OPTICAL_STROKE = 48;
           <path
             d="m16 6l-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"
           />
+        }
+        @case ('pencil') {
+          <g>
+            <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
+            <path d="m15 5 4 4" />
+          </g>
         }
         @case ('plus') {
           <path d="M5 12h14m-7-7v14" />

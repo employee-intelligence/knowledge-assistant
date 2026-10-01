@@ -1,4 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { vi } from 'vitest';
 
 import { ViewerService } from '../../core/services/viewer.service';
 import { AdminDocumentsViewComponent } from './admin-documents-view.component';
@@ -35,6 +36,27 @@ describe('AdminDocumentsViewComponent', () => {
     const field = element().querySelector('app-input input') as HTMLInputElement;
     field.value = term;
     field.dispatchEvent(new Event('input'));
+  };
+
+  /**
+   * Drops a file onto the upload panel, the way a person would.
+   *
+   * The event is built by hand because a file input's `files` list is read-only,
+   * so there is no way to set one the way a picker would.
+   */
+  const chooseFile = (file: File): void => {
+    const zone = element().querySelector('app-document-dropzone > div') as HTMLElement;
+    const event = new Event('drop') as DragEvent;
+    Object.defineProperty(event, 'dataTransfer', { value: { files: [file] } });
+    zone.dispatchEvent(event);
+  };
+
+  /** Clicks a control inside the upload panel, found by its label. */
+  const clickInDropzone = (label: string): void => {
+    const button = Array.from(
+      element().querySelectorAll<HTMLButtonElement>('app-document-dropzone button'),
+    ).find((candidate) => candidate.textContent?.trim() === label) as HTMLButtonElement;
+    button.click();
   };
 
   beforeEach(async () => {
@@ -80,11 +102,13 @@ describe('AdminDocumentsViewComponent', () => {
     viewer.setPreviewRole('administrator');
     await render();
 
-    const retry = element().querySelectorAll<HTMLButtonElement>(
-      'app-document-table button:not([aria-label^="Delete"])',
-    );
+    // Named by the button's own label, so adding another row action later cannot
+    // make this pass by counting the wrong buttons.
+    const retry = element().querySelectorAll<HTMLButtonElement>('app-document-table button');
 
-    expect(retry.length).toBe(1);
+    expect(Array.from(retry).filter((button) => button.textContent?.trim() === 'Retry')).toHaveLength(
+      1,
+    );
   });
 
   it('filters the inventory as the search term changes', async () => {
@@ -163,18 +187,45 @@ describe('AdminDocumentsViewComponent', () => {
     expect(element().textContent).toContain('preview list only');
   });
 
-  it('adds a placeholder row instead of pretending to upload', async () => {
+  it('refuses a file the panel does not claim to support', async () => {
     viewer.setPreviewRole('administrator');
     await render();
     const before = rows();
 
-    const upload = Array.from(element().querySelectorAll<HTMLButtonElement>('button')).find(
-      (button) => button.textContent?.trim() === 'Upload document',
-    ) as HTMLButtonElement;
-    upload.click();
+    chooseFile(new File(['x'], 'payload.exe'));
     await render();
 
-    expect(rows()).toBe(before + 1);
-    expect(element().textContent).toContain('Upload is not connected to a server');
+    // Rejected by extension, in the browser, before anything is read: the file is
+    // named in the refusal so the reader knows which one was turned away.
+    expect(rows()).toBe(before);
+    expect(element().querySelector('app-document-dropzone')?.textContent).toContain(
+      'payload.exe',
+    );
+  });
+
+  it('says nothing was transmitted when a file is taken in', async () => {
+    viewer.setPreviewRole('administrator');
+    await render();
+
+    // The preview runs on a clock, so it is run on a fake one: the bar is driven
+    // by a timer, and waiting two real seconds to assert one message is a slow way
+    // to learn something that is known the moment the file is emitted.
+    vi.useFakeTimers();
+
+    try {
+      chooseFile(new File(['policy text'], 'Security Policy.pdf'));
+      fixture.detectChanges();
+
+      clickInDropzone('Upload');
+      await vi.advanceTimersByTimeAsync(2000);
+      fixture.detectChanges();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The row appears, and the copy admits the bytes went nowhere rather than
+    // claiming an upload that cannot have happened.
+    expect(element().textContent).toContain('Security Policy.pdf');
+    expect(element().textContent).toContain('nothing was transmitted');
   });
 });
