@@ -1,16 +1,16 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
 
-import { HistoryGroup } from '../../../../core/services/history.service';
-import { HistoryItemComponent } from '../history-item/history-item.component';
+import { ConversationGroup } from '../../../../core/services/conversation.service';
+import { ConversationItemComponent } from '../conversation-item/conversation-item.component';
 
 /**
- * Past questions grouped under date headings. Purely presentational: the
- * filtering and grouping are done in `HistoryService`.
+ * Conversations grouped under date headings. Purely presentational: the filtering
+ * and grouping are done in `ConversationService`.
  */
 @Component({
-  selector: 'app-history-list',
+  selector: 'app-conversation-list',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [HistoryItemComponent],
+  imports: [ConversationItemComponent],
   host: { class: 'block' },
   template: `
     <div class="flex flex-col gap-6">
@@ -20,12 +20,12 @@ import { HistoryItemComponent } from '../history-item/history-item.component';
             {{ group.bucket }}
           </h2>
           <ul class="flex flex-col gap-2">
-            @for (entry of group.entries; track entry.question.id) {
+            @for (conversation of group.conversations; track conversation.id) {
               <li>
-                <app-history-item
+                <app-conversation-item
                   appearance="panel"
-                  [entry]="entry"
-                  [isSelected]="entry.question.id === selectedId()"
+                  [conversation]="conversation"
+                  [isSelected]="conversation.id === selectedId()"
                   (selected)="selected.emit($event)"
                 />
               </li>
@@ -35,7 +35,7 @@ import { HistoryItemComponent } from '../history-item/history-item.component';
       } @empty {
         <p
           class="rounded-lg border border-dashed border-border bg-card px-4 py-8 text-center
-          text-sm text-muted-foreground"
+            text-sm text-muted-foreground"
         >
           {{ emptyMessage() }}
         </p>
@@ -43,16 +43,16 @@ import { HistoryItemComponent } from '../history-item/history-item.component';
     </div>
   `,
 })
-export class HistoryListComponent {
-  /** Date-grouped entries to render. */
-  readonly groups = input.required<HistoryGroup[]>();
+export class ConversationListComponent {
+  /** Date-grouped conversations to render. */
+  readonly groups = input.required<ConversationGroup[]>();
 
   /** Highlights the currently open conversation. */
   readonly selectedId = input<string | null>(null);
 
   /** Message shown when there is nothing to list. */
-  readonly emptyMessage = input('No questions match your search.');
+  readonly emptyMessage = input('No conversations match your search.');
 
-  /** Emits the question id when an entry is activated. */
+  /** Emits the conversation id when a row is activated. */
   readonly selected = output<string>();
 }

@@ -63,6 +63,25 @@
 }
 
 @layer base {
+  /*
+   * The document itself never scrolls.
+   *
+   * The shell is a fixed-height flex column (`h-dvh overflow-hidden`) with a
+   * header, one scrollable content area and a composer that stays put, so every
+   * view already provides its own `overflow-y-auto` container. Left to its own
+   * devices the document would also grow and scroll, which drags the view header
+   * and the composer out of view along with the conversation and leaves two
+   * scrollbars fighting over the same content.
+   *
+   * Pinning the document to the viewport makes that structural rather than
+   * incidental: only the scrollable region moves.
+   */
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+  }
+
   html {
     -webkit-text-size-adjust: 100%;
   }

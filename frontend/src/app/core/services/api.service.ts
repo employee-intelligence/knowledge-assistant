@@ -4,16 +4,17 @@ import { Observable, catchError, map, throwError, timeout } from 'rxjs';
 
 import { API_BASE_URL, API_TIMEOUT_MS } from '../api.config';
 import {
-  ChatRequest,
-  ChatResponse,
-  HistoryItemDto,
-  SessionCreateResponse,
+  ChatStreamEventDto,
+  ConversationCreateResponse,
+  ConversationDetailResponse,
+  ConversationListResponse,
+  ConversationSummaryDto,
+  MessageSendRequest,
   SourceDto,
   parseUtcTimestamp,
 } from '../models/api.model';
-import { AnswerResponse, SourceReference } from '../models/message.model';
-import { AnswerStatus } from '../models/question.model';
-import { Turn } from '../models/turn.model';
+import { Conversation, ConversationThread } from '../models/conversation.model';
+import { Message, SourceReference, countDocuments } from '../models/message.model';
 
 /** An error from the backend, already reduced to something a view can show. */
 export class ApiError extends Error {
@@ -23,11 +24,6 @@ export class ApiError extends Error {
     readonly status: number,
     /** True when retrying the same request could plausibly succeed. */
     readonly isTransient: boolean,
-    /**
-     * True when the backend no longer accepts the session the request was made
-     * under, so the conversation it belonged to is gone rather than unfinished.
-     */
-    readonly isSessionLost: boolean = false,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -35,39 +31,14 @@ export class ApiError extends Error {
 }
 
 /**
- * The wording the backend answers with when it will not accept the session a
- * question was posted under.
+ * Shown when a stream ends without a `done` event.
  *
- * `/chat` reports a session it no longer recognises as an ordinary 200 with
- * `answered: false`, which by status alone is indistinguishable from a genuine
- * gap in the corpus. Reading that as a gap is the more damaging of the two
- * mistakes: it tells the user their question was unanswerable when it was never
- * asked, and it leaves the conversation accumulating turns against a session that
- * is already closed, so the follow-up questions that would have made sense are
- * posted into a session that is gone. Recognising it here keeps the decision in
- * one place, next to the endpoint that speaks it.
+ * A connection dropped part way through has produced no answer at all, which is
+ * different from an answer saying the corpus holds nothing, so it is reported as a
+ * temporary failure and stays retryable.
  */
-const SESSION_LOST_ANSWER = 'session expired or invalid';
-
-/** The message shown for a request the backend has no session for. */
-const SESSION_LOST_MESSAGE = 'Your session has expired. Start a new conversation to ask again.';
-
-/** The status an answer outcome maps to. `answered: false` is a genuine gap. */
-function statusFor(answered: boolean): AnswerStatus {
-  return answered ? 'answered' : 'not-found';
-}
-
-/**
- * True when an answer is the backend declining to answer because the session is
- * gone, rather than an answer about the corpus.
- *
- * Only consulted for an `answered: false` response. An answer that happens to
- * mention expiry while actually answering the question is an answer, and is left
- * alone.
- */
-function isSessionLost(answer: string): boolean {
-  return answer.toLowerCase().includes(SESSION_LOST_ANSWER);
-}
+export const STREAM_INCOMPLETE_MESSAGE =
+  'The connection to the assistant was interrupted before the answer finished. Please try again.';
 
 /**
  * The only place that talks to the backend. Components never inject
@@ -75,46 +46,203 @@ function isSessionLost(answer: string): boolean {
  * call this one.
  *
  * Two layers meet here. The methods return the backend's own wire types, so the
- * shape of the HTTP contract is readable in one place, and the `toEntry` mapper
- * turns a history row into the domain model the rest of the app uses. Backend
- * changes land in the mapper instead of rippling outward.
+ * shape of the HTTP contract is readable in one place, and the mappers turn them
+ * into the domain models the rest of the app uses. Backend changes land in a mapper
+ * instead of rippling outward.
  */
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private readonly http = inject(HttpClient);
 
-  /** `POST /sessions`. Opens the conversation the session id keys. */
-  createSession(): Observable<SessionCreateResponse> {
-    return this.post<SessionCreateResponse>('/sessions', {});
+  /**
+   * `POST /api/conversations`. Opens a conversation for this client.
+   *
+   * Only ever called for a conversation the user asked to start. A message posted
+   * to an existing conversation appends to it, so asking a follow-up never lands
+   * the user in a new one.
+   */
+  createConversation(clientId: string): Observable<ConversationCreateResponse> {
+    return this.post<ConversationCreateResponse>('/api/conversations', { client_id: clientId });
+  }
+
+  /** `GET /api/conversations`. Every conversation this client owns, newest first. */
+  getConversations(clientId: string): Observable<Conversation[]> {
+    const path = `/api/conversations?client_id=${encodeURIComponent(clientId)}`;
+
+    return this.get<ConversationListResponse>(path).pipe(
+      map((response) => response.conversations.map((dto) => this.toConversation(dto))),
+    );
   }
 
   /**
-   * `POST /chat`. Asks one question and returns the grounded answer.
+   * `GET /api/conversations/{id}`. One conversation's whole thread, oldest first.
    *
-   * Not retried automatically: a retry would post the question a second time and
-   * the backend would record the duplicate in the session's history. A failed ask
-   * is retried by the user, from the thread, where the effect is visible.
+   * Ordered oldest first by the backend, which is the order a conversation reads
+   * in, so it is used as it arrives.
    */
-  ask(sessionId: string, question: string): Observable<AnswerResponse> {
-    const body: ChatRequest = { session_id: sessionId, question };
+  getConversation(conversationId: string, clientId: string): Observable<ConversationThread> {
+    const path =
+      `/api/conversations/${encodeURIComponent(conversationId)}` +
+      `?client_id=${encodeURIComponent(clientId)}`;
 
-    return this.post<ChatResponse>('/chat', body).pipe(map((response) => this.toAnswer(response)));
+    return this.get<ConversationDetailResponse>(path).pipe(
+      map((response) => ({
+        id: response.id,
+        title: response.title,
+        messages: response.messages.map((dto) => this.toMessage(dto)),
+      })),
+    );
   }
 
-  /** `GET /history/{session_id}`. Every answered turn in the session, oldest first. */
-  getHistory(sessionId: string): Observable<Turn[]> {
-    return this.get<HistoryItemDto[]>(`/history/${encodeURIComponent(sessionId)}`).pipe(
-      // The backend returns a session newest first, which is the right order for a
-      // list the user reads top down but the wrong one for a conversation. Every
-      // consumer here assumes oldest first: a turn's id is its position in that
-      // order, a thread is a slice up to the open turn, and the newest turn is the
-      // last one. Reversing here keeps that single assumption true instead of
-      // scattering corrections across the services that read this.
-      //
-      // The array is reversed before ids are assigned, so id 0 is still the oldest
-      // turn and the newest is last, matching a turn appended locally.
-      map((items) => [...items].reverse().map((item, index) => this.toTurn(item, index))),
-    );
+  /** `POST /api/conversations/{id}/messages`. Asks, and emits the answer as written. */
+  sendMessage(
+    conversationId: string,
+    clientId: string,
+    content: string,
+  ): Observable<ChatStreamEventDto> {
+    return new Observable<ChatStreamEventDto>((subscriber) => {
+      const controller = new AbortController();
+      const body: MessageSendRequest = { client_id: clientId, content };
+      // Emitted from inside the read loop, so the caller sees each piece of the
+      // answer as it lands rather than when the stream ends.
+      const emit = (event: ChatStreamEventDto): void => {
+        if (!controller.signal.aborted) {
+          subscriber.next(event);
+        }
+      };
+
+      void this.readStream(conversationId, body, controller.signal, emit).then(
+        () => subscriber.complete(),
+        (error: unknown) => {
+          if (!controller.signal.aborted) {
+            subscriber.error(this.toApiError(error));
+          }
+        },
+      );
+
+      return () => controller.abort();
+    });
+  }
+
+  /** `PATCH /api/conversations/{id}`. Names a conversation. */
+  renameConversation(conversationId: string, clientId: string, title: string): Observable<void> {
+    const path = `/api/conversations/${encodeURIComponent(conversationId)}`;
+
+    return this.patch<void>(path, { client_id: clientId, title }).pipe(map(() => undefined));
+  }
+
+  /** `DELETE /api/conversations/{id}`. Removes a conversation and its messages. */
+  deleteConversation(conversationId: string, clientId: string): Observable<void> {
+    const path =
+      `/api/conversations/${encodeURIComponent(conversationId)}` +
+      `?client_id=${encodeURIComponent(clientId)}`;
+
+    return this.send(this.http.delete<void>(`${API_BASE_URL}${path}`)).pipe(map(() => undefined));
+  }
+
+  /**
+   * Reads a `text/event-stream` body, handing each event to `onEvent` as it is
+   * parsed.
+   *
+   * Events are separated by a blank line and may arrive split across network
+   * chunks, so the buffer is only drained on a complete frame and whatever follows
+   * the last newline is kept for the next read.
+   */
+  private async readStream(
+    conversationId: string,
+    body: MessageSendRequest,
+    signal: AbortSignal,
+    onEvent: (event: ChatStreamEventDto) => void,
+  ): Promise<void> {
+    let response: Response;
+
+    try {
+      response = await fetch(
+        `${API_BASE_URL}/api/conversations/${encodeURIComponent(conversationId)}/messages`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal,
+        },
+      );
+    } catch {
+      // fetch reports a dropped connection and a refused request the same way,
+      // which is the status-0 case the rest of this service already describes.
+      throw new HttpErrorResponse({ status: 0, error: null });
+    }
+
+    if (!response.ok) {
+      throw new HttpErrorResponse({
+        status: response.status,
+        error: await this.readErrorBody(response),
+      });
+    }
+
+    if (!response.body) {
+      throw new HttpErrorResponse({ status: response.status, error: null });
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    for (;;) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        return;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf('\n\n');
+
+      while (boundary !== -1) {
+        const event = this.parseFrame(buffer.slice(0, boundary));
+
+        if (event) {
+          onEvent(event);
+        }
+
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+  }
+
+  /**
+   * The JSON body of a failed response, or null when it is not JSON.
+   *
+   * A proxy in front of the backend can answer with HTML of its own, which is
+   * a status to report rather than a body to read.
+   */
+  private async readErrorBody(response: Response): Promise<unknown> {
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+
+  /** One SSE frame as an event, or null for a frame that carries no payload. */
+  private parseFrame(frame: string): ChatStreamEventDto | null {
+    const payload = frame
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+      .join('');
+
+    if (!payload) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(payload) as ChatStreamEventDto;
+    } catch {
+      // A frame that is not JSON is not something this client can act on, and
+      // dropping it keeps the rest of the stream usable.
+      return null;
+    }
   }
 
   /**
@@ -134,6 +262,11 @@ export class ApiService {
     return this.send(this.http.post<T>(`${API_BASE_URL}${path}`, body));
   }
 
+  /** A PATCH against a path, with the timeout and the error mapping applied. */
+  private patch<T>(path: string, body: unknown): Observable<T> {
+    return this.send(this.http.patch<T>(`${API_BASE_URL}${path}`, body));
+  }
+
   /** Applies the request timeout and flattens transport failures into `ApiError`. */
   private send<T>(request: Observable<T>): Observable<T> {
     return request.pipe(
@@ -142,55 +275,53 @@ export class ApiService {
     );
   }
 
-  /** Turns a wire source into the domain shape, with every field given a value. */
+  /** A wire conversation as the domain shape. */
+  private toConversation(dto: ConversationSummaryDto): Conversation {
+    return {
+      id: dto.id,
+      title: dto.title,
+      updatedAt: parseUtcTimestamp(dto.updated_at),
+    };
+  }
+
+  /**
+   * A wire message as the domain shape.
+   *
+   * `sources` is null on a question, which cites nothing, so it becomes an empty
+   * list rather than a nullable field every consumer would have to check. The
+   * status is derived here rather than stored: a message that is in the backend is
+   * finished, and only a locally streamed one is still pending or has failed.
+   */
+  private toMessage(dto: {
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    sources: SourceDto[] | null;
+    created_at: string;
+  }): Message {
+    const sources = (dto.sources ?? []).map((source) => this.toSource(source));
+
+    return {
+      id: dto.id,
+      role: dto.role,
+      text: dto.content,
+      createdAt: parseUtcTimestamp(dto.created_at),
+      // A message in the backend has been delivered, so it is never pending and
+      // never failed. Those two states belong to an answer being streamed here, and
+      // a question carries no outcome at all.
+      status: 'answered',
+      sources,
+      documentCount: countDocuments(sources),
+    };
+  }
+
+  /** Turns a wire source into the domain shape. */
   private toSource(dto: SourceDto): SourceReference {
     return {
       document: dto.document,
       section: dto.section,
       snippet: dto.snippet,
       score: dto.score,
-    };
-  }
-
-  /**
-   * A chat response as the domain model the services work with.
-   *
-   * A response the backend refused to answer because the session is gone is
-   * raised as an error rather than returned as an answer. It reaches this method
-   * as a success, so without the check it would be filed on the turn as a "not
-   * found in the documents" card and the user would be told their question had no
-   * answer, when the question was never asked. Raising it puts it on the same
-   * path as any other failure, which is where the services already know to report
-   * an expired session and offer a new conversation.
-   */
-  private toAnswer(response: ChatResponse): AnswerResponse {
-    if (!response.answered && isSessionLost(response.answer)) {
-      throw new ApiError(SESSION_LOST_MESSAGE, 0, false, true);
-    }
-
-    return {
-      text: response.answer,
-      status: statusFor(response.answered),
-      sources: (response.sources ?? []).map((dto) => this.toSource(dto)),
-    };
-  }
-
-  /**
-   * A history row as a turn.
-   *
-   * The position in the list becomes the turn's id. The backend keys history by
-   * session and returns no per-question identifier, and a session's history only
-   * grows at the end, so a position is the one handle that stays valid across a
-   * reload.
-   */
-  private toTurn(dto: HistoryItemDto, index: number): Turn {
-    return {
-      id: String(index),
-      question: dto.question,
-      answer: dto.answer,
-      status: statusFor(dto.answered),
-      sources: (dto.sources ?? []).map((source) => this.toSource(source)),
-      createdAt: parseUtcTimestamp(dto.created_at),
     };
   }
 
@@ -202,14 +333,10 @@ export class ApiService {
    * described together: from here they are the same thing and saying otherwise
    * would be a distinction the page cannot actually make.
    *
-   * A 422 means the question itself was rejected, so the backend's own wording is
+   * A 422 means the message itself was rejected, so the backend's own wording is
    * passed through; a 5xx means the answer may still be there and is worth
-   * retrying.
-   *
-   * A rejection of the session itself is kept apart from both, because retrying
-   * it is pointless and telling the user to rephrase would be wrong: the id they
-   * are posting under is dead. Those statuses are marked as a lost session so the
-   * caller reports an expiry rather than a failed question.
+   * retrying. A 404 means the conversation is not there to answer into, which is
+   * the one failure a retry cannot fix.
    */
   private toApiError(error: unknown): ApiError {
     if (error instanceof HttpErrorResponse) {
@@ -235,11 +362,8 @@ export class ApiService {
         );
       }
 
-      // 401 and 403 are how an endpoint says the session is not usable; 404 is how
-      // one says the session itself is no longer there. All three mean the same
-      // thing here, and none of them are worth a retry.
-      if (error.status === 401 || error.status === 403 || error.status === 404) {
-        return new ApiError(SESSION_LOST_MESSAGE, error.status, false, true);
+      if (error.status === 404) {
+        return new ApiError('That conversation is no longer available.', 404, false);
       }
 
       return new ApiError('The request could not be completed.', error.status, false);

@@ -10,22 +10,46 @@ services:
     dockerContext: ./backend
 
     envVars:
-      # Set this in the Render dashboard. An absent or revoked key does not stop
-      # the service booting, it only makes /chat fail, so /health reports it.
-      - key: GOOGLE_API_KEY
+      # Generation key, set in the Render dashboard. An absent or revoked key does
+      # not stop the service booting, it only makes /chat fail, so /health
+      # reports it.
+      - key: NVIDIA_API_KEY
         sync: false
 
-      # gemini-2.5-flash is retired for new accounts and now answers 404, which
-      # surfaced only as a 500 from /chat.
+      # Retrieval key, kept separate so embedding traffic has its own quota.
+      # Required at startup: the policy documents are embedded while the index is
+      # built, so a missing key here is a failed deploy rather than a 503.
+      - key: NVIDIA_EMBEDDING_API_KEY
+        sync: false
+
+      # NVIDIA serves an OpenAI-compatible API at this base URL.
+      - key: NVIDIA_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+
       - key: LLM_MODEL
-        value: gemini-3.8-flash
+        value: openai/gpt-oss-20b
 
-      # Tried in order when the primary is throttled, before giving up.
-      - key: LLM_FALLBACK_MODELS
-        value: gemini-3.5-flash,gemini-3.7-flash,gemini-flash-latest
+      - key: LLM_TEMPERATURE
+        value: "0.5"
 
+      - key: LLM_TOP_P
+        value: "1"
+
+      - key: LLM_MAX_TOKENS
+        value: "1024"
+
+      # A 429/5xx is retried with backoff before a question gives up with a 503.
+      - key: LLM_MAX_ATTEMPTS
+        value: "3"
+
+      - key: EMBED_MODEL
+        value: nvidia/nemotron-3-embed-1b
+
+      # Tuned against this embedding model with `python scripts/tune.py`, which
+      # prints the score of every retrieved chunk. A threshold that is too high
+      # makes every question look like "not found".
       - key: MIN_SCORE
-        value: "0.45"
+        value: "0.40"
 
       # The frontend is served from its own origin, not localhost, so the
       # previous value locked the deployed app out of the API.

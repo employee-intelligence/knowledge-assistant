@@ -1,46 +1,75 @@
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { ActivatedRoute, convertToParamMap, provideRouter, Router } from '@angular/router';
-import { of } from 'rxjs';
-import { vi } from 'vitest';
+import { ActivatedRoute, convertToParamMap, ParamMap, provideRouter } from '@angular/router';
+import { BehaviorSubject } from 'rxjs';
 
 import { ChatService } from '../../core/services/chat.service';
+import { Message } from '../../core/models/message.model';
 import { ResponseViewComponent } from './response-view.component';
+
+/** A question and its answer, as the thread renders them. */
+const MESSAGES: Message[] = [
+  {
+    id: 'm1',
+    role: 'user',
+    text: 'How much leave do I have?',
+    status: 'answered',
+    sources: [],
+    documentCount: 0,
+    createdAt: '2026-09-30T09:00:00Z',
+  },
+  {
+    id: 'm2',
+    role: 'assistant',
+    text: 'Twenty days.',
+    status: 'answered',
+    sources: [],
+    documentCount: 0,
+    createdAt: '2026-09-30T09:00:01Z',
+  },
+];
 
 /** The parts of the chat service this view reads. */
 interface ChatStub {
   threadTitle: () => string;
   isResolving: () => boolean;
   isEmpty: () => boolean;
-  hasMessages: () => boolean;
-  messages: () => unknown[];
+  isMissing: () => boolean;
+  messages: () => Message[];
   isLoading: () => boolean;
-  sessionExpired: () => boolean;
-  openTurn: (turnId: string | null) => void;
+  isPreparing: () => boolean;
+  openConversation: (conversationId: string) => void;
   ask: (question: string) => void;
-  retry: (turnId: string) => void;
+  retry: (messageId: string) => void;
 }
 
 describe('ResponseViewComponent', () => {
-  let expired: ReturnType<typeof signal<boolean>>;
+  let resolving: ReturnType<typeof signal<boolean>>;
+  let empty: ReturnType<typeof signal<boolean>>;
+  let missing: ReturnType<typeof signal<boolean>>;
+  let messages: ReturnType<typeof signal<Message[]>>;
+  let opened: string[];
+  let asked: string[];
+  let retried: string[];
   let chat: ChatStub;
-  let router: Router;
   let fixture: ComponentFixture<ResponseViewComponent>;
+  let paramMap: BehaviorSubject<ParamMap>;
 
-  beforeEach(async () => {
-    expired = signal(false);
+  const build = async (id: string | null): Promise<void> => {
     chat = {
       threadTitle: () => 'Annual leave entitlement',
-      isResolving: () => false,
-      isEmpty: () => false,
-      hasMessages: () => true,
-      messages: () => [],
+      isResolving: () => resolving(),
+      isEmpty: () => empty(),
+      isMissing: () => missing(),
+      messages: () => messages(),
       isLoading: () => false,
-      sessionExpired: () => expired(),
-      openTurn: () => undefined,
-      ask: () => undefined,
-      retry: () => undefined,
+      isPreparing: () => false,
+      openConversation: (conversationId) => opened.push(conversationId),
+      ask: (question) => asked.push(question),
+      retry: (messageId) => retried.push(messageId),
     };
+
+    paramMap = new BehaviorSubject(convertToParamMap(id === null ? {} : { id }));
 
     await TestBed.configureTestingModule({
       imports: [ResponseViewComponent],
@@ -49,57 +78,177 @@ describe('ResponseViewComponent', () => {
         { provide: ChatService, useValue: chat },
         {
           provide: ActivatedRoute,
-          // The route's id is a turn's position. Absent here, so the view follows
-          // the newest turn the way a question sent from the dashboard arrives.
-          useValue: { paramMap: of(convertToParamMap({})) },
+          useValue: { paramMap: paramMap.asObservable() },
         },
       ],
     }).compileComponents();
 
-    router = TestBed.inject(Router);
-    vi.spyOn(router, 'navigate').mockResolvedValue(true);
-
     fixture = TestBed.createComponent(ResponseViewComponent);
     await fixture.whenStable();
+  };
+
+  beforeEach(() => {
+    resolving = signal(false);
+    empty = signal(false);
+    missing = signal(false);
+    messages = signal(MESSAGES);
+    opened = [];
+    asked = [];
+    retried = [];
   });
 
   /** The rendered element, for what the screen is showing. */
   const element = (): HTMLElement => fixture.nativeElement as HTMLElement;
 
-  it('goes home when the session behind the conversation ends', async () => {
-    expect(router.navigate).not.toHaveBeenCalled();
-
-    expired.set(true);
+  const refresh = async (): Promise<void> => {
+    fixture.detectChanges();
     await fixture.whenStable();
+  };
 
-    // The route change is the whole of the recovery: the user lands in front of
-    // the dashboard's composer, where the next question opens a fresh session.
-    expect(router.navigate).toHaveBeenCalledWith(['/']);
+  describe('a loaded conversation', () => {
+    beforeEach(async () => {
+      await build('conv-1');
+    });
+
+    it('shows the conversation title in the header', () => {
+      expect(element().querySelector('app-view-header')?.textContent).toContain(
+        'Annual leave entitlement',
+      );
+    });
+
+    it('renders the thread and the composer', () => {
+      expect(element().querySelector('app-chat-thread')).toBeTruthy();
+      expect(element().querySelector('app-question-input')).toBeTruthy();
+    });
+
+    it('keeps the header and the composer outside the scrolling thread', () => {
+      // The one scrollable container is the message list. Anything inside it moves
+      // with the conversation; anything outside it cannot.
+      const scroller = element().querySelector('[role="log"]');
+
+      expect(scroller).toBeTruthy();
+      expect(scroller?.classList.contains('overflow-y-auto')).toBe(true);
+      expect(scroller?.querySelector('app-view-header')).toBeNull();
+      expect(scroller?.querySelector('app-question-input')).toBeNull();
+      expect(element().querySelector('app-view-header')).toBeTruthy();
+      expect(element().querySelector('app-question-input')).toBeTruthy();
+    });
+
+    it('holds the scrolling thread to the space between them, so the composer stays put', () => {
+      const scroller = element().querySelector('[role="log"]');
+
+      // `flex-1` takes the height left over by the fixed header and composer, and
+      // `min-h-0` lets it shrink below its content instead of pushing the composer
+      // off the bottom of the page.
+      expect(scroller?.classList.contains('flex-1')).toBe(true);
+      expect(scroller?.classList.contains('min-h-0')).toBe(true);
+
+      const composer = element().querySelector('app-question-input')?.parentElement?.parentElement;
+
+      // `shrink-0` is what holds the composer at its own height while the thread
+      // scrolls behind it.
+      expect(composer?.classList.contains('shrink-0')).toBe(true);
+    });
+
+    it('asks a follow-up in the open conversation', async () => {
+      const textarea = element().querySelector('textarea') as HTMLTextAreaElement;
+
+      textarea.value = 'Can I carry it over?';
+      textarea.dispatchEvent(new Event('input'));
+      await refresh();
+      element().querySelector<HTMLButtonElement>('button[type="submit"]')?.click();
+      await refresh();
+
+      expect(asked).toEqual(['Can I carry it over?']);
+    });
+
+    it('asks a failed message again through the thread', async () => {
+      messages.set([{ ...MESSAGES[1], status: 'failed', text: 'It went wrong.' }]);
+      await refresh();
+
+      element().querySelector<HTMLButtonElement>('app-answer-failed button')?.click();
+
+      expect(retried).toEqual(['m2']);
+    });
+
+    it('opens the conversation the route names', () => {
+      // The id is the conversation's own, and the view hands it to the one service
+      // that decides what is open.
+      expect(opened).toContain('conv-1');
+    });
+
+    it('opens the newly selected conversation when the route id changes', async () => {
+      // Picking another conversation from the sidebar changes only the id, so the
+      // view has to re-open on that change; otherwise the sidebar appears dead.
+      opened = [];
+
+      paramMap.next(convertToParamMap({ id: 'conv-2' }));
+      await refresh();
+
+      expect(opened).toEqual(['conv-2']);
+    });
   });
 
-  it('stays put while the conversation is intact', async () => {
-    // Reading an old turn is not a reason to bounce the user off it.
-    expect(router.navigate).not.toHaveBeenCalled();
+  describe('the states before the thread', () => {
+    beforeEach(async () => {
+      resolving = signal(true);
+      await build('conv-1');
+    });
+
+    it('shows a loading placeholder while a conversation is on its way', () => {
+      expect(element().querySelector('[role="status"]')?.textContent).toContain('Loading');
+      expect(element().querySelector('app-chat-thread')).toBeNull();
+    });
+
+    it('does not report a conversation as missing while it is still loading', async () => {
+      missing.set(true);
+      await refresh();
+
+      // Loading wins. A link that is merely on its way is not a link to nothing.
+      expect(element().textContent).not.toContain('Conversation not found');
+    });
+
+    it('does not report a conversation as empty while it is still loading', async () => {
+      empty.set(true);
+      await refresh();
+
+      expect(element().textContent).not.toContain('No questions yet');
+    });
   });
 
-  it('never puts an expiry screen in front of the user', async () => {
-    expired.set(true);
+  it('says a conversation that is gone is not found, not that it is empty', async () => {
+    empty = signal(false);
+    missing = signal(true);
+    messages = signal([]);
+    await build('gone');
     await fixture.whenStable();
 
-    // The conversation is gone, so the view holds nothing about it. A page
-    // explaining that would stand where a working composer should be.
-    expect(element().textContent).not.toContain('Session expired');
+    // An empty thread would read as a conversation that has lost its history, which
+    // is the opposite of what a deleted link means.
+    expect(element().textContent).toContain('Conversation not found');
+    expect(element().textContent).not.toContain('No questions yet');
   });
 
-  it('leaves a composer behind rather than stranding the user', async () => {
-    // The service resets to an empty conversation, so there is somewhere to ask
-    // the next question even before the route finishes changing.
-    chat.hasMessages = () => false;
-    chat.isEmpty = () => true;
-    expired.set(true);
-
+  it('invites a first question in an empty conversation', async () => {
+    resolving = signal(false);
+    empty = signal(true);
+    missing = signal(false);
+    messages = signal([]);
+    await build('conv-1');
     await fixture.whenStable();
 
+    expect(element().textContent).toContain('No questions yet');
+    expect(element().textContent).not.toContain('Conversation not found');
+    // The composer stays: an empty conversation is exactly where a question is
+    // asked, so taking it away would be taking away the only thing to do.
     expect(element().querySelector('app-question-input')).toBeTruthy();
+  });
+
+  it('follows the last active conversation when the route names none', async () => {
+    await build(null);
+
+    // `/response` with no id, which is where a question sent from the dashboard
+    // lands. There is no conversation to open, so none is opened.
+    expect(opened).toEqual([]);
   });
 });

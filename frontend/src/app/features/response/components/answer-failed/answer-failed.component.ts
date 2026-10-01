@@ -5,15 +5,14 @@ import { ButtonComponent } from '../../../../shared/components/button/button.com
 import { IconComponent } from '../../../../shared/components/icon/icon.component';
 
 /**
- * Shown when the request for a turn failed, rather than when the assistant
+ * Shown when the request for a message failed, rather than when the assistant
  * answered that it had nothing.
  *
  * The distinction is the whole point of the card. "Not found in company
  * documents" is a confident statement about the corpus and there is nothing to
  * retry; a failed request means the answer may well exist, so the card offers to
  * ask again instead of sending the user off to rephrase.
- */
-@Component({
+ */@Component({
   selector: 'app-answer-failed',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [ButtonComponent, IconComponent],
@@ -29,17 +28,17 @@ import { IconComponent } from '../../../../shared/components/icon/icon.component
       </div>
       <p class="mt-1.5 text-sm leading-relaxed text-muted-foreground">{{ message().text }}</p>
 
-      <button
-        app-button
-        type="button"
-        variant="outline"
-        size="sm"
-        class="mt-3"
-        [disabled]="isBusy()"
-        (click)="retry.emit(turnId())"
-      >
-        Try again
-      </button>
+        <button
+          app-button
+          type="button"
+          variant="outline"
+          size="sm"
+          class="mt-3"
+          [disabled]="isBusy()"
+          (click)="retry.emit(message().id)"
+        >
+          Try again
+        </button>
     </div>
   `,
 })
@@ -51,13 +50,9 @@ export class AnswerFailedComponent {
   readonly isBusy = input(false);
 
   /**
-   * Emits the turn to ask again. The id is the assistant half's, so the thread
-   * does not have to know a turn is a pair.
+   * Emits the message to ask again. The id is the failed answer's own, so the
+   * card does not have to know that a question and its answer are a pair: the
+   * thread finds the question it belongs to.
    */
   readonly retry = output<string>();
-
-  /** The turn this message belongs to, taken from the assistant message's id. */
-  protected turnId(): string {
-    return this.message().id.replace(/-assistant$/, '');
-  }
 }
