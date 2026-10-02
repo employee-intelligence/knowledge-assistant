@@ -3,8 +3,11 @@ import { ChangeDetectionStrategy, Component, input } from '@angular/core';
 import { IconComponent, type IconName } from '../../../../shared/components/icon/icon.component';
 
 /**
- * One headline number on the administrator dashboard: the figure, what it
- * counts, and a short note on what changed.
+ * One headline number: the figure, what it counts, and a short note underneath.
+ *
+ * The value is a string rather than a number so a caller can say "not indexed yet"
+ * where a count would force a misleading zero. A figure that cannot be counted is
+ * not the same as a count of nothing, and this is where that difference is shown.
  */
 @Component({
   selector: 'app-stat-card',

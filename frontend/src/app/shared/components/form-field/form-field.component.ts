@@ -44,8 +44,8 @@ let nextFieldId = 0;
         <input
           [id]="controlId"
           [type]="resolvedType()"
-          class="w-full bg-transparent text-sm text-foreground placeholder:text-muted-foreground
-            focus:outline-none"
+          class="w-full bg-transparent text-sm text-foreground focus:outline-none"
+          [class]="placeholderClasses()"
           [placeholder]="placeholder()"
           [attr.autocomplete]="autocomplete()"
           [attr.aria-invalid]="error() ? true : null"
@@ -115,8 +115,24 @@ export class FormFieldComponent {
   /** Id of the error text. */
   protected readonly errorId = `${this.controlId}-error`;
 
+  /**
+   * Whether the placeholder is set very faint rather than the muted default.
+   *
+   * Off by default so the shared field keeps its current contrast, and on for the
+   * signed-out screens, where a long placeholder sits under a short label and the
+   * muted default competes with the value the field is asking for.
+   */
+  readonly faintPlaceholder = input(false);
+
   /** Whether a password is currently visible. */
   protected readonly revealed = signal(false);
+
+  /** Placeholder colour, faint when asked for. */
+  protected readonly placeholderClasses = computed(() =>
+    this.faintPlaceholder()
+      ? 'placeholder:text-muted-foreground/45'
+      : 'placeholder:text-muted-foreground',
+  );
 
   /** Border colour, reddened while an error is shown. */
   protected readonly borderClasses = computed(() =>

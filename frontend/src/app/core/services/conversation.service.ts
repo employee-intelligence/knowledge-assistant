@@ -1,5 +1,13 @@
 import { isPlatformBrowser } from '@angular/common';
-import { DestroyRef, Injectable, PLATFORM_ID, computed, inject, signal } from '@angular/core';
+import {
+  DestroyRef,
+  Injectable,
+  PLATFORM_ID,
+  computed,
+  effect,
+  inject,
+  signal,
+} from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Observable, ReplaySubject, catchError, map, of, shareReplay, tap } from 'rxjs';
 
@@ -7,6 +15,7 @@ import { toDateBucket, type DateBucket } from '../../shared/utils/format-date.ut
 import { Conversation } from '../models/conversation.model';
 import { Message } from '../models/message.model';
 import { ApiError, ApiService } from './api.service';
+import { AuthService, type AuthStatus } from './auth.service';
 import { IdentityService } from './identity.service';
 
 /** List headings, in the order they are shown. */
@@ -40,6 +49,7 @@ export interface ConversationGroup {
 @Injectable({ providedIn: 'root' })
 export class ConversationService {
   private readonly api = inject(ApiService);
+  private readonly auth = inject(AuthService);
   private readonly identity = inject(IdentityService);
   private readonly destroyRef = inject(DestroyRef);
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
@@ -64,6 +74,9 @@ export class ConversationService {
 
   /** Completes once the first load has settled, so callers can queue behind it. */
   private readonly settled = new ReplaySubject<void>(1);
+
+  /** The session status the list was last brought in line with. */
+  private settledFor: AuthStatus = 'unknown';
 
   /**
    * In-flight creation, shared so concurrent callers get the same conversation.
@@ -159,7 +172,22 @@ export class ConversationService {
     // render would otherwise pay the round trip on every request to paint a list
     // the client is about to fetch anyway.
     if (this.isBrowser) {
-      this.load();
+      // The list waits for a session rather than asking and being refused. Every
+      // conversation route is behind the session wall, so a request made before the
+      // cookie has been checked is a guaranteed 401 — and the failure it produced
+      // was a console error and an empty sidebar rather than an honest "nobody is
+      // signed in".
+      //
+      // Applied once directly as well as through the effect, because on a page load
+      // the app initializer has usually already answered by the time this is built.
+      // That makes the common case — arriving signed in — fetch straight away, the
+      // way it did before there was a session to wait for.
+      this.syncToSession(this.auth.status());
+
+      // Watching the status is what makes the list appear after a sign-in without
+      // anything else having to ask for it, and disappear again after a sign-out.
+      effect(() => this.syncToSession(this.auth.status()));
+
       return;
     }
 
@@ -185,12 +213,53 @@ export class ConversationService {
   }
 
   /**
+   * Brings the list in line with the session.
+   *
+   * Guarded on the last status acted on rather than called for every reading of the
+   * signal, so the effect and the direct call in the constructor cannot both fetch.
+   */
+  private syncToSession(status: AuthStatus): void {
+    if (status === this.settledFor) {
+      return;
+    }
+
+    this.settledFor = status;
+
+    if (status === 'authenticated') {
+      this.load();
+      return;
+    }
+
+    if (status === 'anonymous') {
+      this.showSignedOut();
+    }
+  }
+
+  /**
+   * The state of a browser with nobody signed in: no conversations, and nothing
+   * pending.
+   *
+   * Settled rather than left waiting. Anything queueing on the first load — a
+   * question typed the instant the shell appears — has to be released, or it would
+   * sit behind a list that is never coming.
+   */
+  private showSignedOut(): void {
+    this.conversationsState.set([]);
+    this.activeIdState.set(null);
+    this.messagesState.set([]);
+    this.missingState.set(null);
+    this.loadingState.set(false);
+    this.loadedState.set(true);
+    this.markSettled();
+  }
+
+  /**
    * Fetches this browser's conversations and opens the most recent one.
    *
-   * A browser with no conversations yet gets one created, so the composer always
-   * has somewhere to send a question. That is the only conversation this service
-   * creates on its own initiative, and it happens before the user has asked
-   * anything; every later one is asked for.
+   * Nothing is created here. Opening the app, or finding no conversations at all,
+   * leaves no conversation behind: there is nothing to have asked, so there is
+   * nothing to keep. A conversation is created when a question is actually sent —
+   * see `ChatService.ask` — which is the first moment there is anything in one.
    */
   load(): void {
     this.loadingState.set(true);
@@ -213,14 +282,11 @@ export class ConversationService {
         const mostRecent = conversations[0];
 
         if (!mostRecent) {
-          // Nothing to restore, so a question has to have somewhere to go. The
-          // thread is left empty rather than fetched: there is nothing in it yet.
-          // Settling waits for the create, so a question asked on a first visit
-          // queues behind it instead of being dropped for want of a conversation.
-          this.createConversation().subscribe({
-            next: () => this.markSettled(),
-            error: () => this.markSettled(),
-          });
+          // A first visit. The thread stays empty and no conversation is opened,
+          // which is the state the view already knows how to describe: a conversation
+          // waiting for its first question. Asking one creates the conversation, so
+          // nothing is on the server until there is a question on it.
+          this.markSettled();
           return;
         }
 
@@ -237,10 +303,36 @@ export class ConversationService {
   }
 
   /**
+   * Prepares a new conversation in the UI without creating one.
+   *
+   * This is what "New conversation" does: the thread is emptied and the composer is
+   * pointed at nothing, and that is the whole of it. No request is made, no id is
+   * taken, and the sidebar is unchanged — the conversation the person was in stays
+   * in it, which is the point of a new conversation being a way to start another one
+   * rather than a way to replace this one.
+   *
+   * What this leaves behind is deliberately *not* a conversation: there is no id, no
+   * row, and nothing on the server. `ChatService.ask` creates the real one the moment
+   * a question is sent into it.
+   */
+  startUnsaved(): void {
+    this.activeIdState.set(null);
+    this.messagesState.set([]);
+    this.missingState.set(null);
+    this.searchTermState.set('');
+    this.threadLoadingState.set(false);
+  }
+
+  /**
    * Opens a new conversation and makes it the active one.
    *
+   * Called only once there is a question for it — see `ChatService.ask`. The new
+   * conversation is deliberately *not* added to the sidebar here: it has no messages
+   * yet, and the list is re-read once the answer lands, at which point there is
+   * something in it to list.
+   *
    * De-duplicated: two callers asking at once share one request, so a double click
-   * on "New conversation" leaves one empty conversation rather than two.
+   * on "Send" leaves one conversation rather than two.
    */
   createConversation(): Observable<Conversation> {
     if (!this.pendingCreate) {
@@ -254,7 +346,10 @@ export class ConversationService {
             updatedAt: new Date().toISOString(),
           };
 
-          this.conversationsState.update((conversations) => [conversation, ...conversations]);
+          // Not added to the list. An id alone is not a conversation: with no message
+          // in it there is nothing to list, and putting it there would show an
+          // untitled row for as long as the answer took to arrive. `refreshSummaries`
+          // puts it in once the exchange has been recorded.
           this.activeIdState.set(conversation.id);
           this.messagesState.set([]);
 
@@ -551,7 +646,10 @@ export class ConversationService {
           return;
         }
 
-        this.createConversation().subscribe();
+        // The last conversation is gone, so there is nothing to open. The composer is
+        // left with an empty thread rather than being given a new conversation to
+        // fill: the next question asked will create one.
+        this.startUnsaved();
       });
   }
 
@@ -566,10 +664,7 @@ export class ConversationService {
   }
 
   /** Applies a change to one message, ignoring ids that are no longer present. */
-  private patchMessage(
-    messageId: string,
-    change: (message: Message) => Message,
-  ): void {
+  private patchMessage(messageId: string, change: (message: Message) => Message): void {
     this.messagesState.update((messages) =>
       messages.map((message) => (message.id === messageId ? change(message) : message)),
     );
@@ -589,9 +684,16 @@ export class ConversationService {
   }
 
   /** Releases everything waiting on the first load, once or many times over. */
+  /**
+   * Releases everything waiting on the first load.
+   *
+   * Never completed, because a browser can be signed out, then in, and each of those
+   * settles the load again. A `ReplaySubject(1)` replays the last one to anything
+   * subscribing later, so a caller that arrives after the list is already here is
+   * released immediately rather than waiting for a load that will not come again.
+   */
   private markSettled(): void {
     this.settled.next();
-    this.settled.complete();
   }
 }
 

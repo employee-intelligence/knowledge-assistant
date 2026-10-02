@@ -32,7 +32,10 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app import main
-from app.database import Base, Conversation, Message
+from app.config import settings
+from app.database import Base, Conversation, Message, User
+from app.dependencies import ACCESS_COOKIE, CSRF_COOKIE
+from app.security import create_access_token, hash_password, new_csrf_token
 
 SOURCE = {
     "document": "Leave Policy",
@@ -105,6 +108,32 @@ class ConversationTestCase(unittest.TestCase):
         # runs the lifespan, and the lifespan builds an index over the network.
         self.client = TestClient(main.app)
 
+        # Every conversation route is behind the session wall, so this client signs
+        # in the way the app does rather than being waved through: a real user row
+        # and a real signed access token. `test_auth.py` is where the sign-in flow
+        # itself is exercised; this is only here so the conversation tests reach
+        # their subject.
+        self.auth_secret = settings.auth_secret_key
+        self.addCleanup(setattr, settings, "auth_secret_key", self.auth_secret)
+        settings.auth_secret_key = "test-secret-key-that-is-definitely-long-enough-000"
+
+        self.user = User(
+            id="test-employee",
+            email=f"employee@{settings.email_domain}",
+            name="Ama Konadu",
+            role="employee",
+            password_hash=hash_password("correct-horse-1!"),
+            is_active=True,
+        )
+        self.db.add(self.user)
+        self.db.commit()
+
+        access_token, _ = create_access_token(self.user.id, self.user.role)
+        self.csrf_token = new_csrf_token()
+
+        for name, value in ((ACCESS_COOKIE, access_token), (CSRF_COOKIE, self.csrf_token)):
+            self.client.cookies.set(name, value)
+
     def _restore_open_db(self) -> None:
         main.open_db = self.open_db
 
@@ -114,9 +143,17 @@ class ConversationTestCase(unittest.TestCase):
         else:
             main.state["assistant"] = self.assistant
 
+    def csrf_headers(self) -> dict:
+        """The double-submit header, which every state-changing route now needs."""
+        return {"X-CSRF-Token": self.csrf_token}
+
     def new_conversation(self, client_id: str = CLIENT_A) -> str:
         """Creates a conversation through the endpoint, as a client would."""
-        response = self.client.post("/api/conversations", json={"client_id": client_id})
+        response = self.client.post(
+            "/api/conversations",
+            json={"client_id": client_id},
+            headers=self.csrf_headers(),
+        )
         self.assertEqual(response.status_code, 200, response.text)
 
         return response.json()["id"]
@@ -125,6 +162,7 @@ class ConversationTestCase(unittest.TestCase):
         return self.client.post(
             f"/api/conversations/{conversation_id}/messages",
             json={"client_id": client_id, "content": question},
+            headers=self.csrf_headers(),
         )
 
     def conversations_in_db(self) -> list[str]:
@@ -225,10 +263,13 @@ class OwnershipTest(ConversationTestCase):
 
     def test_each_client_sees_only_its_own_conversations(self):
         mine = self.new_conversation(CLIENT_A)
-        self.ask(mine, "In mine?")
+        self.assertEqual(self.ask(mine, "In mine?").status_code, 200)
 
         theirs = self.new_conversation(CLIENT_B)
-        self.ask(theirs, "In theirs?")
+        # Asked as CLIENT_B, which the ownership check on the endpoint requires. Asking
+        # as the other client is a 404, and an unasked conversation is not listed, so
+        # the status is asserted rather than left to show up as an empty list later.
+        self.assertEqual(self.ask(theirs, "In theirs?", CLIENT_B).status_code, 200)
 
         self.assertEqual(
             [item["id"] for item in self.client.get(
@@ -247,7 +288,9 @@ class OwnershipTest(ConversationTestCase):
         conversation_id = self.new_conversation(CLIENT_A)
 
         response = self.client.delete(
-            f"/api/conversations/{conversation_id}", params={"client_id": CLIENT_B}
+            f"/api/conversations/{conversation_id}",
+            params={"client_id": CLIENT_B},
+            headers=self.csrf_headers(),
         )
 
         self.assertEqual(response.status_code, 404, response.text)
@@ -259,9 +302,96 @@ class OwnershipTest(ConversationTestCase):
         response = self.client.patch(
             f"/api/conversations/{conversation_id}",
             json={"client_id": CLIENT_B, "title": "Stolen"},
+            headers=self.csrf_headers(),
         )
 
         self.assertEqual(response.status_code, 404, response.text)
+
+
+class EmptyConversationTest(ConversationTestCase):
+    """A conversation nothing has been said in is not listed.
+
+    The row exists from the moment a conversation is created, so an abandoned one —
+    a closed tab, a send that failed, a click on "New conversation" — would otherwise
+    sit in the sidebar forever as a thread nobody asked for. It is filtered at the
+    source so no client has to decide what counts as real.
+
+    The messages are written straight into the database rather than sent through the
+    ask endpoint. What is under test is the list, and the endpoint has its own tests;
+    going through it would also start a title job in a background thread that outlives
+    the request, which is a race this fixture does not need to enter.
+    """
+
+    def say(self, conversation_id: str, content: str = "A real question?") -> None:
+        self.db.add(
+            Message(
+                id=f"m-{conversation_id}",
+                conversation_id=conversation_id,
+                role="user",
+                content=content,
+                sources=None,
+            )
+        )
+        self.db.commit()
+
+    def listed_ids(self, client_id: str = CLIENT_A) -> list[str]:
+        response = self.client.get("/api/conversations", params={"client_id": client_id})
+
+        self.assertEqual(response.status_code, 200, response.text)
+
+        return [item["id"] for item in response.json()["conversations"]]
+
+    def test_a_conversation_with_no_messages_is_not_listed(self):
+        created = self.new_conversation()
+
+        self.assertEqual(self.listed_ids(), [])
+        # Still there, and still addressable: it is the list that hides it, not a
+        # conversation that was never made. A question sent into it makes it real.
+        self.assertIn(created, self.conversations_in_db())
+
+    def test_it_is_listed_once_it_has_a_message(self):
+        conversation_id = self.new_conversation()
+
+        self.say(conversation_id)
+
+        self.assertEqual(self.listed_ids(), [conversation_id])
+
+    def test_several_empty_ones_stay_hidden_while_a_real_one_is_listed(self):
+        self.new_conversation()
+        self.new_conversation()
+        real = self.new_conversation()
+
+        self.say(real)
+
+        self.assertEqual(self.listed_ids(), [real])
+
+    def test_an_untitled_conversation_is_still_listed(self):
+        # The title is generated beside the answer, so a real conversation can be a
+        # question whose answer failed: no title, but not empty either. It belongs in
+        # the list, which is why the filter is on messages and not on the title.
+        conversation_id = self.new_conversation()
+
+        self.say(conversation_id)
+
+        listed = self.client.get(
+            "/api/conversations", params={"client_id": CLIENT_A}
+        ).json()["conversations"]
+
+        self.assertEqual(len(listed), 1)
+        self.assertIsNone(listed[0]["title"])
+
+    def test_it_is_still_addressable_directly(self):
+        # Hidden from the list, not unreachable: a conversation the user has the link
+        # for is a conversation they can open.
+        conversation_id = self.new_conversation()
+        self.say(conversation_id)
+
+        response = self.client.get(
+            f"/api/conversations/{conversation_id}", params={"client_id": CLIENT_A}
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()["messages"]), 1)
 
 
 class ConversationLifecycleTest(ConversationTestCase):
@@ -278,6 +408,11 @@ class ConversationLifecycleTest(ConversationTestCase):
                 ).json()["conversations"]
             ]
 
+        # Both are asked in, because an unanswered conversation is not listed at all
+        # and there would be no order to compare.
+        self.ask(first, "Anything in the first?")
+        self.ask(second, "Anything in the second?")
+
         self.assertEqual(listed_ids(), [second, first])
 
         self.ask(first, "Back to the first?")
@@ -286,10 +421,12 @@ class ConversationLifecycleTest(ConversationTestCase):
 
     def test_rename_replaces_the_generated_title(self):
         conversation_id = self.new_conversation()
+        self.ask(conversation_id, "Anything?")
 
         response = self.client.patch(
             f"/api/conversations/{conversation_id}",
             json={"client_id": CLIENT_A, "title": "Leave questions"},
+            headers=self.csrf_headers(),
         )
         self.assertEqual(response.status_code, 200, response.text)
 
@@ -308,7 +445,9 @@ class ConversationLifecycleTest(ConversationTestCase):
         self.ask(conversation_id, "Anything?")
 
         response = self.client.delete(
-            f"/api/conversations/{conversation_id}", params={"client_id": CLIENT_A}
+            f"/api/conversations/{conversation_id}",
+            params={"client_id": CLIENT_A},
+            headers=self.csrf_headers(),
         )
 
         self.assertEqual(response.status_code, 200, response.text)
@@ -339,11 +478,14 @@ class TitleGenerationTest(ConversationTestCase):
     def test_generated_title_replaces_the_untitled_placeholder_in_the_list(self):
         conversation_id = self.new_conversation()
 
-        # The placeholder holds until the first answer lands.
-        listed = self.client.get(
-            "/api/conversations", params={"client_id": CLIENT_A}
-        ).json()["conversations"]
-        self.assertIsNone(listed[0]["title"])
+        # Nothing is listed yet, so there is no placeholder to show: the conversation
+        # joins the list when it has something in it rather than when it is created.
+        self.assertEqual(
+            self.client.get(
+                "/api/conversations", params={"client_id": CLIENT_A}
+            ).json()["conversations"],
+            [],
+        )
 
         self.ask(conversation_id, "How much leave do I have?")
 
@@ -351,6 +493,19 @@ class TitleGenerationTest(ConversationTestCase):
             "/api/conversations", params={"client_id": CLIENT_A}
         ).json()["conversations"]
         self.assertIn("About:", listed[0]["title"])
+
+    def test_a_question_asked_before_the_title_arrives_still_lists_without_one(self):
+        # The title is generated beside the answer, so there is a moment when a real
+        # conversation has none. It is listed rather than hidden, because it is not
+        # empty — which is the distinction the list filter draws.
+        conversation_id = self.new_conversation()
+
+        self.ask(conversation_id, "How much leave do I have?")
+
+        listed = self.client.get(
+            "/api/conversations", params={"client_id": CLIENT_A}
+        ).json()["conversations"]
+        self.assertEqual(len(listed), 1)
 
     def test_a_second_exchange_does_not_regenerate_the_title(self):
         conversation_id = self.new_conversation()
@@ -402,6 +557,7 @@ class TitleGenerationTest(ConversationTestCase):
             "POST",
             f"/api/conversations/{conversation_id}/messages",
             json={"client_id": CLIENT_A, "content": "How much leave?"},
+            headers=self.csrf_headers(),
         ) as response:
             # Read the first chunk, then walk away mid-answer.
             for _ in response.iter_bytes():

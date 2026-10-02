@@ -4,6 +4,7 @@ import { TestBed } from '@angular/core/testing';
 
 import { API_BASE_URL } from '../api.config';
 import { ChatStreamEventDto } from '../models/api.model';
+import { AuthServiceStub, provideAuthStub } from '../testing/auth-service.stub';
 import { ChatService } from './chat.service';
 import { ConversationService } from './conversation.service';
 import { IdentityService } from './identity.service';
@@ -101,8 +102,17 @@ describe('ChatService', () => {
     });
 
     TestBed.configureTestingModule({
-      providers: [provideHttpClient(), provideHttpClientTesting()],
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        // Conversations only load behind a session, so these tests need one. Signed
+        // in as an employee: this suite is about asking questions, and an employee
+        // is the role that can.
+        provideAuthStub(),
+      ],
     });
+
+    TestBed.inject(AuthServiceStub).setRole('employee');
 
     // Injecting the chat service constructs the conversation service, which
     // fetches this browser's list. The client id has to be read first, because
@@ -198,31 +208,36 @@ describe('ChatService', () => {
       expect(chat.threadTitle()).toBe('Annual leave');
     });
 
-    it('reports an empty conversation as empty rather than as missing', () => {
+    it('creates nothing on a first visit, because nothing has been asked', () => {
       http.expectOne(listUrl()).flush({ conversations: [] });
-      http.expectOne(`${API_BASE_URL}/api/conversations`).flush({
-        id: 'conv-new',
-        title: null,
-        created_at: '2026-09-30T09:00:00',
-      });
 
-      // The first visit lands here: a conversation waiting for its first question,
-      // which is not an error and must not be reported as a missing conversation.
+      // The whole point of the empty-list case: there is no question, so there is no
+      // conversation. A create here is how an untitled row ends up in the sidebar
+      // before anybody has typed.
+      http.expectNone(`${API_BASE_URL}/api/conversations`);
+
+      // The first visit lands on an empty thread, which is a conversation waiting for
+      // its first question — not an error, and not a missing conversation.
       expect(chat.isEmpty()).toBe(true);
-      expect(chat.threadTitle()).toBe('New conversation');
+      expect(chat.activeConversationId()).toBeNull();
+      expect(chat.hasMessages()).toBe(false);
     });
 
     it('stays resolving while the list is on its way', () => {
       expect(chat.isResolving()).toBe(true);
 
       http.expectOne(listUrl()).flush({ conversations: [] });
-      http.expectOne(`${API_BASE_URL}/api/conversations`).flush({
-        id: 'conv-new',
-        title: null,
-        created_at: '2026-09-30T09:00:00',
-      });
 
       expect(chat.isResolving()).toBe(false);
+    });
+
+    it('leaves the sidebar empty on a first visit, so there is no empty row in it', () => {
+      http.expectOne(listUrl()).flush({ conversations: [] });
+
+      // Not an entry reading "New conversation": the list is empty because there is
+      // nothing to list.
+      expect(conversations.conversations()).toEqual([]);
+      expect(conversations.hasConversations()).toBe(false);
     });
   });
 
@@ -294,7 +309,11 @@ describe('ChatService', () => {
 
       // The earlier exchange is the backend's, and the new one is local, in the
       // same thread, in order.
-      expect(messages().slice(0, 2).map((message) => message.id)).toEqual(['m1', 'm2']);
+      expect(
+        messages()
+          .slice(0, 2)
+          .map((message) => message.id),
+      ).toEqual(['m1', 'm2']);
     });
 
     it('ignores a question with no words in it', () => {
@@ -501,7 +520,11 @@ describe('ChatService', () => {
       chat.retry(failedId);
 
       // The restored exchange is still the first thing in the thread.
-      expect(messages().slice(0, 2).map((message) => message.id)).toEqual(['m1', 'm2']);
+      expect(
+        messages()
+          .slice(0, 2)
+          .map((message) => message.id),
+      ).toEqual(['m1', 'm2']);
     });
 
     it('does nothing while a question is already in flight', async () => {
@@ -534,10 +557,34 @@ describe('ChatService', () => {
         id: 'conv-1',
         title: 'Leave',
         messages: [
-          { id: 'm1', role: 'user', content: 'First?', sources: null, created_at: '2026-09-30T09:00:00' },
-          { id: 'm2', role: 'assistant', content: 'Yes.', sources: [], created_at: '2026-09-30T09:00:01' },
-          { id: 'm3', role: 'user', content: 'Second?', sources: null, created_at: '2026-09-30T09:00:02' },
-          { id: 'm4', role: 'assistant', content: 'No.', sources: [], created_at: '2026-09-30T09:00:03' },
+          {
+            id: 'm1',
+            role: 'user',
+            content: 'First?',
+            sources: null,
+            created_at: '2026-09-30T09:00:00',
+          },
+          {
+            id: 'm2',
+            role: 'assistant',
+            content: 'Yes.',
+            sources: [],
+            created_at: '2026-09-30T09:00:01',
+          },
+          {
+            id: 'm3',
+            role: 'user',
+            content: 'Second?',
+            sources: null,
+            created_at: '2026-09-30T09:00:02',
+          },
+          {
+            id: 'm4',
+            role: 'assistant',
+            content: 'No.',
+            sources: [],
+            created_at: '2026-09-30T09:00:03',
+          },
         ],
       });
 
@@ -550,25 +597,88 @@ describe('ChatService', () => {
   });
 
   describe('starting and opening conversations', () => {
-    it('creates a real conversation rather than pointing back at the current thread', () => {
+    it('creates nothing when a new conversation is started, only empties the thread', () => {
       givenRestoredConversations();
 
       chat.startNewConversation();
 
-      const request = http.expectOne(`${API_BASE_URL}/api/conversations`);
-
-      expect(request.request.body).toEqual({ client_id: clientId });
-      request.flush({ id: 'conv-3', title: null, created_at: '2026-09-30T10:00:00' });
+      // No request at all. An unsaved conversation has no id to persist and no row to
+      // list; the id is taken when a question is actually sent into it.
+      http.expectNone(`${API_BASE_URL}/api/conversations`);
 
       // The conversation it left behind stays in the sidebar. That is the whole
       // point of conversations outliving the question that started them.
-      expect(conversations.conversations().map((item) => item.id)).toEqual([
-        'conv-3',
-        'conv-1',
-        'conv-2',
-      ]);
-      expect(chat.activeConversationId()).toBe('conv-3');
+      expect(conversations.conversations().map((item) => item.id)).toEqual(['conv-1', 'conv-2']);
+      expect(chat.activeConversationId()).toBeNull();
       expect(chat.isEmpty()).toBe(true);
+      expect(chat.hasMessages()).toBe(false);
+    });
+
+    it('creates the conversation on the first question, and only then', () => {
+      http.expectOne(listUrl()).flush({ conversations: [] });
+
+      chat.ask('How much leave do I have?');
+
+      // The one moment a conversation comes into being: a question has been sent.
+      const created = http.expectOne(`${API_BASE_URL}/api/conversations`);
+
+      expect(created.request.body).toEqual({ client_id: clientId });
+      created.flush({ id: 'conv-new', title: null, created_at: '2026-09-30T10:00:00' });
+
+      expect(chat.activeConversationId()).toBe('conv-new');
+      expect(chat.hasMessages()).toBe(true);
+    });
+
+    it('reuses the one conversation for every follow-up question', () => {
+      http.expectOne(listUrl()).flush({ conversations: [] });
+
+      chat.ask('First question?');
+      http
+        .expectOne(`${API_BASE_URL}/api/conversations`)
+        .flush({ id: 'conv-new', title: null, created_at: '2026-09-30T10:00:00' });
+
+      // One conversation, not one per question: this is what makes a follow-up a
+      // follow-up rather than the start of a second thread.
+      chat.ask('Second question?');
+
+      http.expectNone(`${API_BASE_URL}/api/conversations`);
+      expect(chat.activeConversationId()).toBe('conv-new');
+    });
+
+    it('sends a question into the conversation the person opened, not a new one', () => {
+      givenRestoredConversations();
+
+      conversations.openConversation('conv-2');
+      http
+        .expectOne(`${API_BASE_URL}/api/conversations/conv-2?client_id=${clientId}`)
+        .flush({
+          id: 'conv-2',
+          title: 'VPN setup',
+          messages: [{ id: 'm9', role: 'user', content: 'How do I connect?', sources: null, created_at: '2026-09-29T09:00:00' }],
+        });
+
+      chat.ask('And on a phone?');
+
+      // The whole of "existing conversations keep working": an opened conversation is
+      // the one the next question goes into.
+      http.expectNone(`${API_BASE_URL}/api/conversations`);
+      expect(streamRequests.map((request) => request.url)).toContain(
+        `${API_BASE_URL}/api/conversations/conv-2/messages`,
+      );
+    });
+
+    it('keeps the new conversation out of the sidebar until it has something in it', () => {
+      http.expectOne(listUrl()).flush({ conversations: [] });
+
+      chat.ask('How much leave do I have?');
+
+      http
+        .expectOne(`${API_BASE_URL}/api/conversations`)
+        .flush({ id: 'conv-new', title: null, created_at: '2026-09-30T10:00:00' });
+
+      // An id is not a conversation. Listing it now would put an untitled row in the
+      // sidebar for as long as the answer took to arrive.
+      expect(conversations.conversations()).toEqual([]);
     });
 
     it('opens an existing conversation and loads its thread', () => {
@@ -576,15 +686,29 @@ describe('ChatService', () => {
 
       chat.openConversation('conv-2');
 
-      const request = http.expectOne(`${API_BASE_URL}/api/conversations/conv-2?client_id=${clientId}`);
+      const request = http.expectOne(
+        `${API_BASE_URL}/api/conversations/conv-2?client_id=${clientId}`,
+      );
 
       expect(request.request.method).toBe('GET');
       request.flush({
         id: 'conv-2',
         title: 'Expenses',
         messages: [
-          { id: 'e1', role: 'user', content: 'Mileage?', sources: null, created_at: '2026-09-28T09:00:00' },
-          { id: 'e2', role: 'assistant', content: 'Forty pence.', sources: [], created_at: '2026-09-28T09:00:01' },
+          {
+            id: 'e1',
+            role: 'user',
+            content: 'Mileage?',
+            sources: null,
+            created_at: '2026-09-28T09:00:00',
+          },
+          {
+            id: 'e2',
+            role: 'assistant',
+            content: 'Forty pence.',
+            sources: [],
+            created_at: '2026-09-28T09:00:01',
+          },
         ],
       });
 
@@ -603,7 +727,13 @@ describe('ChatService', () => {
         id: 'conv-2',
         title: 'Expenses',
         messages: [
-          { id: 'e1', role: 'user', content: 'Mileage?', sources: null, created_at: '2026-09-28T09:00:00' },
+          {
+            id: 'e1',
+            role: 'user',
+            content: 'Mileage?',
+            sources: null,
+            created_at: '2026-09-28T09:00:00',
+          },
         ],
       });
 
@@ -641,7 +771,13 @@ describe('ChatService', () => {
         id: 'conv-1',
         title: 'Annual leave',
         messages: [
-          { id: 'm1', role: 'user', content: 'How much leave do I have?', sources: null, created_at: '2026-09-30T09:00:00' },
+          {
+            id: 'm1',
+            role: 'user',
+            content: 'How much leave do I have?',
+            sources: null,
+            created_at: '2026-09-30T09:00:00',
+          },
         ],
       });
 
@@ -649,7 +785,13 @@ describe('ChatService', () => {
         id: 'conv-2',
         title: 'Expenses',
         messages: [
-          { id: 'e1', role: 'user', content: 'Mileage?', sources: null, created_at: '2026-09-28T09:00:00' },
+          {
+            id: 'e1',
+            role: 'user',
+            content: 'Mileage?',
+            sources: null,
+            created_at: '2026-09-28T09:00:00',
+          },
         ],
       });
 

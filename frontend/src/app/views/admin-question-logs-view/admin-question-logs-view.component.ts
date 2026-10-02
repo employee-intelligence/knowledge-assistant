@@ -6,7 +6,7 @@ import {
   type QuestionLog,
   type QuestionOutcome,
 } from '../../core/models/question-log.model';
-import { ViewerService } from '../../core/services/viewer.service';
+import { AuthService } from '../../core/services/auth.service';
 import { AdminAccessRequiredComponent } from '../../features/admin/components/admin-access-required/admin-access-required.component';
 import { QuestionLogDetailComponent } from '../../features/admin/components/question-log-detail/question-log-detail.component';
 import { QuestionLogTableComponent } from '../../features/admin/components/question-log-table/question-log-table.component';
@@ -45,7 +45,7 @@ const ALL_LABEL = 'All';
   template: `
     <app-view-header title="Question logs" />
 
-    @if (viewer.isAdministrator()) {
+    @if (auth.isAdmin()) {
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
         <div class="mx-auto w-full max-w-4xl">
           <div class="w-full sm:max-w-xs">
@@ -116,8 +116,8 @@ const ALL_LABEL = 'All';
   `,
 })
 export class AdminQuestionLogsViewComponent {
-  /** The viewer, which decides whether this area is open at all. */
-  protected readonly viewer = inject(ViewerService);
+  /** Who is signed in, which decides whether this area is open at all. */
+  protected readonly auth = inject(AuthService);
 
   /** Current search term. */
   protected readonly search = signal('');
@@ -145,8 +145,7 @@ export class AdminQuestionLogsViewComponent {
     return logs.filter((log) => {
       const matchesOutcome = outcome === 'all' || log.outcome === outcome;
       const matchesTerm =
-        term === '' ||
-        `${log.question} ${log.askedBy}`.toLowerCase().includes(term);
+        term === '' || `${log.question} ${log.askedBy}`.toLowerCase().includes(term);
 
       return matchesOutcome && matchesTerm;
     });

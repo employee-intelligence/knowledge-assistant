@@ -7,19 +7,27 @@
 export const MIN_QUESTION_LENGTH = 3;
 export const MAX_QUESTION_LENGTH = 500;
 
-/** Placeholder shown in the composer when it is empty. */
-export const QUESTION_PLACEHOLDER = 'Ask a question about company policies...';
+/**
+ * Placeholder shown in the composer when it is empty.
+ *
+ * Two words. It sits inside a field that is already the widest thing on the screen
+ * and already has a send button beside it, so a sentence describing what the
+ * assistant knows is redundant with the answer it gives. Anything longer than this
+ * is read rather than glanced at, and it is gone the moment the field is touched.
+ */
+export const QUESTION_PLACEHOLDER = 'Ask anything';
 
 /**
- * Starter prompts on the dashboard. Product copy rather than data: the backend
- * has no endpoint for them, and inventing one would mean guessing at a contract
- * it does not have.
+ * Starter prompts on the dashboard. Product copy rather than data: the backend has
+ * no endpoint for them, and inventing one would mean guessing at a contract it does
+ * not have.
+ *
+ * Two of them, and two words each. A row of suggestions is a decision aid, so the
+ * smaller it is the more it reads as a choice rather than as a menu to browse, and a
+ * two-word topic is enough to recognise what the assistant knows about. The full
+ * question is typed into the composer, which is one field away and remembers it.
  */
-export const STARTER_QUESTIONS: readonly string[] = [
-  'How many annual leave days do I have?',
-  'How do I set up my company email?',
-  'What do I need to complete during onboarding?',
-];
+export const STARTER_QUESTIONS: readonly string[] = ['Annual leave', 'VPN setup'];
 
 /** Key used to remember the desktop sidebar preference. */
 export const SIDEBAR_PREFERENCE_KEY = 'ika.sidebar.collapsed';

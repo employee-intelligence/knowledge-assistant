@@ -1,6 +1,13 @@
 # Knowledge Assistant Backend
 
-Internal knowledge assistant API for Acme Technologies. Answers employee questions using RAG (Retrieval-Augmented Generation) over company policy documents, powered by NVIDIA NIM.
+Internal knowledge assistant API for **Acme Technologies**. Answers employee questions using RAG (Retrieval-Augmented Generation) over company policy documents, powered by NVIDIA NIM.
+
+> **Not an AmaliTech product.** The repository lives under an `Amalitech/` directory and
+> AmaliTech's brand assets were used as a placeholder palette, but the product is for
+> Acme Technologies and its users are Acme employees — accounts only exist for
+> `@acmetech.example` addresses, and that rule is enforced server-side. Nothing in
+> either should be read as an AmaliTech deployment. The Tailwind theme tokens still
+> hold placeholder colours and need replacing with Acme's verified brand values.
 
 ## Tech Stack
 
@@ -9,6 +16,7 @@ Internal knowledge assistant API for Acme Technologies. Answers employee questio
 - **Embeddings:** NVIDIA `nvidia/nemotron-3-embed-1b`, a retrieval/QA model rather than a general-purpose embedder
 - **RAG Pipeline:** LlamaIndex
 - **Database:** PostgreSQL (SQLAlchemy ORM)
+- **Authentication:** invite-only, cookie sessions — HS256 JWTs via `python-jose`, bcrypt via `passlib`, rate limiting via `slowapi`. See `Phase_2_Authentication.md`.
 - **Deployment:** Docker + Render
 
 ## Project Structure
@@ -20,7 +28,13 @@ backend/
 │   ├── main.py            # FastAPI app & routes
 │   ├── config.py          # Settings (env-based)
 │   ├── database.py        # SQLAlchemy models & session
-│   ├── schemas.py         # Pydantic request/response models
+│   ├── schemas.py         # Pydantic models for conversations
+│   ├── auth.py            # The /api/auth routes
+│   ├── security.py        # Token signing, password hashing, sanitisation
+│   ├── dependencies.py    # get_current_user, require_admin, CSRF check
+│   ├── schemas_auth.py    # Pydantic models for auth, incl. the domain rule
+│   ├── rate_limit.py      # Per-IP limits on sign-in routes
+│   ├── bootstrap_admin.py # Creates the first administrator, from a shell
 │   └── rag/
 │       ├── __init__.py
 │       ├── engine.py      # RAG assistant (retrieve + generate)
@@ -31,7 +45,12 @@ backend/
 │   ├── 01-company-overview.md
 │   └── ...
 ├── scripts/
-│   └── tune.py            # Tuning script
+│   ├── tune.py                     # Retrieval threshold tuning
+│   └── verify_auth_checklist.sh    # Walks the auth security checklist against a running server
+├── tests/
+│   ├── test_auth.py        # Auth, at the level of the HTTP contract
+│   ├── test_conversations.py
+│   └── test_engine_stream.py
 ├── Dockerfile
 ├── requirements.txt
 ├── .env.example
@@ -73,9 +92,19 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your NVIDIA keys (generation + retrieval) and database URL
 
-# 4. Run the app
+# 4. Create the first administrator
+#
+# Accounts are invite-only, so somebody has to be made first. This refuses to run
+# once any administrator exists, and asks for the password without echoing it.
+python -m app.bootstrap_admin --email you@acmetech.example --name "Your Name"
+
+# 5. Run the app
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+Everyone else joins by invitation: sign in as an administrator and use
+`POST /api/auth/invite`. It returns the invitation link, because no mail service is
+configured — an administrator copies it and sends it themselves.
 
 ## Environment Variables
 
@@ -91,10 +120,105 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `LLM_MAX_ATTEMPTS` | No | `3` | Attempts before a 429/5xx is given up on |
 | `EMBED_MODEL` | No | `nvidia/nemotron-3-embed-1b` | Model used for retrieval embeddings |
 | `DATABASE_URL` | No | `postgresql://user:password@localhost:5432/knowledge_assistant` | PostgreSQL connection string |
-| `ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS origins |
+| `ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS origins. Must be listed explicitly in production: cookies are not sent to a wildcard. |
+| `ENVIRONMENT` | No | `development` | `production` forces `Secure` cookies and refuses the seeded admin |
+| `AUTH_SECRET_KEY` | Yes | — | Signs both token types. At least 32 characters |
+| `COMPANY_EMAIL_DOMAIN` | No | `acmetech.example` | The only domain an account may be created against |
+| `ACCESS_TOKEN_TTL_SECONDS` | No | `900` | Access token lifetime (15 minutes) |
+| `REFRESH_TOKEN_TTL_SECONDS` | No | `1209600` | Refresh token lifetime (14 days) |
+| `INVITE_TTL_SECONDS` | No | `259200` | How long an invitation can be opened (72 hours) |
+| `BCRYPT_ROUNDS` | No | `12` | Password hashing cost |
+| `AUTH_COOKIE_SECURE` | No | `true` | `false` only for local http. Production forces it on regardless |
+| `CSRF_TRUSTED_ORIGINS` | No | falls back to `ALLOWED_ORIGINS` | Origins allowed to make cookie-authenticated writes. Must match the app's origin exactly — `localhost` and `127.0.0.1` are different, and a mismatch shows up as a 403 rather than an error |
+| `FRONTEND_BASE_URL` | No | `http://localhost:4200` | Where an invitation link points |
+| `AUTH_BOOTSTRAP_KEY` | No | — | Guards the one route that can create the first administrator. Prefer `python -m app.bootstrap_admin` |
+| `AUTH_SEED_ADMIN_EMAIL` / `_PASSWORD` / `_NAME` | No | — | Seeds an administrator at startup. Ignored when `ENVIRONMENT=production` |
 | `TOP_K` | No | `4` | Number of documents to retrieve |
 | `MIN_SCORE` | No | `0.40` | Minimum similarity score threshold |
 | `DATA_DIR` | No | `data` | Path to policy documents |
+
+`AUTH_SECRET_KEY` can be generated with:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Rotating it signs every existing session out, which is the intended effect.
+
+## Authentication
+
+Two roles: `employee` and `admin`. There is no self-registration endpoint — an open
+form would let anyone who can type a colleague's address claim that address, since a
+domain check only proves they typed it. There are two ways in instead:
+
+| Who | How |
+|---|---|
+| An employee | Opens `/register`, fills in a name and work email, and waits. An administrator reviews it and approves. |
+| Somebody an administrator chose | The administrator generates an invitation link from **Admin → Invite** and sends it themselves. |
+
+An access request creates **no account**. A `users` row appears only when an
+administrator approves, and the role is set by that approval — a requester cannot
+name one, because the field is not on the model. Approving mints the same
+single-use invitation link the Invite screen does.
+
+### There is no mail service, so how does an invitation arrive?
+
+By hand, and the product says so rather than pretending. Approving or generating an
+invitation returns a link that the **Admin → Invite** and **Admin → Access requests**
+screens display with a **Copy link** button and an "Open it" link for checking before
+sending. The administrator then sends it however the company already communicates.
+
+That is a worse experience than sending an email, and it is deliberately not a hidden
+one. There is no queue and nothing silently dropped: either the link leaves the
+administrator's hands or it does not, and an unclaimed invitation expires after 72
+hours and can be issued again. What it avoids is "the invitation was sent, we think".
+
+### The first administrator
+
+Accounts are invite-only, so somebody has to exist before anybody can be invited.
+Two ways:
+
+```bash
+# From a shell. The password is read without an echo.
+python -m app.bootstrap_admin --email you@acmetech.example --name "Your Name"
+
+# Or set these in backend/.env and let startup seed one. Refused when
+# ENVIRONMENT=production, and the password goes through the same policy as any other.
+AUTH_SEED_ADMIN_EMAIL=you@acmetech.example
+AUTH_SEED_ADMIN_PASSWORD=<something long>
+```
+
+**Remove the seeded password once a real administrator exists.** A known password in
+a `.env` file is a standing way in, and `.env` is gitignored but not secret.
+
+The session is a pair of `httpOnly` cookies — a 15-minute access token and a 14-day
+refresh token, both HS256. Neither ever appears in a response body, in storage, or
+in a cookie JavaScript can read; the only readable cookie is the double-submit CSRF
+token, which carries no authority of its own.
+
+Refresh tokens rotate on every use, and presenting one that has already been
+exchanged is treated as possible theft: the whole family is revoked and both parties
+have to sign in again. A client that simply never dropped an old cookie looks
+identical from the server, so the safe answer is to end the family rather than guess.
+
+`login` and `accept-invite` are rate limited to 5 attempts a minute per IP, and
+state-changing requests need an `X-CSRF-Token` header matching the `ika_csrf` cookie.
+
+The design, the schema, and the security checklist are in
+[`Phase_2_Authentication.md`](Phase_2_Authentication.md). The checklist is executable:
+73 in-process tests, a shell script that walks it against a running server, and a
+real-browser script that walks the whole flow end to end — including asking for
+access, an administrator answering, and generating an invitation.
+
+```bash
+.venv/bin/python -m unittest tests.test_auth tests.test_conversations tests.test_engine_stream
+
+# Once a minute, and with the server running. It signs in several times and sign-in is
+# limited to five attempts a minute, so two runs back to back fail for a reason that
+# has nothing to do with the code.
+ADMIN_EMAIL=... ADMIN_PASSWORD=... SQLITE_DB=checklist.db \
+  ./scripts/verify_auth_checklist.sh
+```
 
 `MIN_SCORE` is tied to `EMBED_MODEL`: different embedding models produce different
 score ranges, so after changing it check the numbers with
@@ -117,6 +241,39 @@ writes no history row. `/health` reports `degraded` when the generation key is
 missing and `embedding_configured` for the retrieval key.
 
 ## API Endpoints
+
+### Authentication
+
+All of these live under `/api/auth`. Tokens are returned as `httpOnly` cookies, never
+in a response body.
+
+| Method | Path | Guard | Purpose |
+|---|---|---|---|
+| `GET` | `/api/auth/csrf` | public | Issues a CSRF token and sets the readable cookie |
+| `POST` | `/api/auth/login` | public, rate limited | Signs in; sets both cookies |
+| `POST` | `/api/auth/accept-invite` | public, rate limited | `{ token, password }` — activates the account and signs in |
+| `POST` | `/api/auth/refresh` | refresh cookie | Rotates the refresh token, issues a new access token |
+| `POST` | `/api/auth/logout` | refresh cookie | Revokes the session and clears both cookies |
+| `GET` | `/api/auth/me` | access cookie | The signed-in user: `id`, `name`, `email`, `role` |
+| `POST` | `/api/auth/invite` | **admin** | Creates a pending user, returns the invite link |
+| `POST` | `/api/auth/accounts` | **admin** | Creates an active user outright, with a password the admin chooses |
+| `POST` | `/api/auth/request-access` | public, CSRF, rate limited | `{ name, email }` — asks for an account. Creates no account |
+| `GET` | `/api/auth/requests` | **admin** | Everybody waiting, pending first |
+| `POST` | `/api/auth/requests/{id}/approve` | **admin** | Provisions the account, returns the invite link |
+| `POST` | `/api/auth/requests/{id}/decline` | **admin** | Turns it down; provisions nothing |
+| `GET` | `/api/auth/invite/{token}` | public | What the invitation is for, to pre-fill the accept screen |
+| `POST` | `/api/auth/bootstrap-admin` | `AUTH_BOOTSTRAP_KEY`, once only | Creates the first administrator |
+
+A signing-in example, which is the shortest way to see the cookie flags:
+
+```bash
+curl -i -c jar.txt -X POST http://localhost:8000/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@acmetech.example","password":"..."}'
+```
+
+Every state-changing request other than the four exempt ones needs
+`X-CSRF-Token` matching the `ika_csrf` cookie.
 
 ### Health Check
 

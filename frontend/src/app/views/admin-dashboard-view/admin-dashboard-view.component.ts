@@ -1,57 +1,39 @@
-import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
-import { RouterLink, RouterLinkActive } from '@angular/router';
+import { ChangeDetectionStrategy, Component, OnInit, computed, inject } from '@angular/core';
+import { RouterLink } from '@angular/router';
 
-import {
-  MOCK_ADMIN_ACTIVITY,
-  MOCK_ADMIN_STATS,
-  MOCK_DOCUMENTS,
-  MOCK_QUESTION_LOGS,
-} from '../../core/data/mock-admin.data';
-import {
-  QUESTION_OUTCOME_LABELS,
-  type QuestionOutcome,
-} from '../../core/models/question-log.model';
-import { ViewerService } from '../../core/services/viewer.service';
+import { ActivityService } from '../../core/services/activity.service';
+import { AuthService } from '../../core/services/auth.service';
 import { AdminAccessRequiredComponent } from '../../features/admin/components/admin-access-required/admin-access-required.component';
 import { StatCardComponent } from '../../features/admin/components/stat-card/stat-card.component';
 import { ViewHeaderComponent } from '../../features/chat/components/view-header/view-header.component';
-import { BadgeComponent, type BadgeTone } from '../../shared/components/badge/badge.component';
 import { ButtonComponent } from '../../shared/components/button/button.component';
 import { IconComponent } from '../../shared/components/icon/icon.component';
+import { SkeletonComponent } from '../../shared/components/skeleton/skeleton.component';
 import { formatRelativeTime } from '../../shared/utils/relative-time.util';
 
-/** Colour per outcome, so a question that went wrong is visible in the list. */
-const OUTCOME_TONES: Record<QuestionOutcome, BadgeTone> = {
-  answered: 'info',
-  'not-found': 'warning',
-  failed: 'danger',
-};
-
 /**
- * The three administration screens, as a tab bar.
+ * The administrator's landing screen.
  *
- * A tab bar rather than a row of link cards: both were navigation to the same two
- * places, and having two systems for one job means the reader has to work out
- * which is the real one. The tabs carry the position, so the current screen is
- * visible at all times.
+ * Two things, and only two: the figures an administrator is asked for, and what has
+ * happened lately. The indexing breakdown, the knowledge-base health bar and the
+ * recent-questions panel that used to live here were all derived from a placeholder
+ * document list, so every one of them was a number with nothing behind it. They are
+ * gone rather than reworded, because a real figure next to an invented one is worse
+ * than the invented one alone — an administrator cannot tell which is which.
+ *
+ * Navigation is the sidebar's job. This screen used to carry a tab bar as well,
+ * which meant two systems for one job and left the reader working out which was
+ * the real one.
  */
-const TABS: { label: string; path: string }[] = [
-  { label: 'Dashboard', path: '/admin' },
-  { label: 'Documents', path: '/admin/documents' },
-  { label: 'Question logs', path: '/admin/questions' },
-];
-
-/** The administrator's landing screen: the shape of the knowledge base at a glance. */
 @Component({
   selector: 'app-admin-dashboard-view',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
     AdminAccessRequiredComponent,
-    BadgeComponent,
     ButtonComponent,
     IconComponent,
     RouterLink,
-    RouterLinkActive,
+    SkeletonComponent,
     StatCardComponent,
     ViewHeaderComponent,
   ],
@@ -59,212 +41,177 @@ const TABS: { label: string; path: string }[] = [
   template: `
     <app-view-header title="Admin Dashboard" />
 
-    @if (viewer.isAdministrator()) {
+    @if (auth.isAdmin()) {
+      <!--
+        No max-width here, and that is the point: the header strip above spans the
+        full content area, so a capped, centred column below it left the title and
+        the panels it is about sitting at two different widths. The horizontal
+        padding matches the header's own, so the left edges line up with each other.
+      -->
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
-        <div class="mx-auto w-full max-w-5xl">
-          <div class="flex flex-wrap items-start justify-between gap-3">
-            <p class="text-sm text-muted-foreground">
-              Monitor your knowledge base and employee questions.
-            </p>
+        <!--
+          Goes to the documents screen rather than opening a panel here: the upload
+          modal lives there, and a second one would be the same control in two places
+          with the two copies drifting apart. Right-aligned on its own so it does not
+          need a paragraph of explanation beside it to justify where it sits.
+        -->
+        <div class="flex justify-end">
+          <a app-button routerLink="/admin/documents" class="shrink-0">
+            <app-icon name="upload" [size]="16" />
+            <span>Upload document</span>
+          </a>
+        </div>
 
+        <div class="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <app-stat-card
+            label="Documents indexed"
+            [value]="asText(activity.documentCount())"
+            [detail]="documentDetail()"
+            icon="file-text"
+          />
+
+          <app-stat-card
+            label="Waiting for access"
+            [value]="asText(activity.pendingRequestCount())"
+            [detail]="pendingDetail()"
+            icon="users"
+          />
+
+          <app-stat-card
+            label="Conversations"
+            [value]="asText(activity.conversationCount())"
+            detail="Asked from this browser"
+            icon="message-square-text"
+          />
+        </div>
+
+        <section class="mt-8 pb-4">
+          <h2 class="font-headings text-sm font-semibold text-foreground">Recent activity</h2>
+
+          @if (activity.isLoading()) {
             <!--
-              Goes to the documents screen rather than opening a dialog here: the
-              upload panel lives there, and a second one would be the same control
-              in two places with the two copies drifting apart.
+              Four rows in the exact shape of the real ones, rather than a spinner. The
+              panel has a border and a height whether or not anything is in it, and a
+              spinner in the middle of it means the list arrives by pushing everything
+              on the page down.
             -->
-            <a app-button routerLink="/admin/documents" class="shrink-0">
-              <app-icon name="upload" [size]="16" />
-              <span>Upload document</span>
-            </a>
-          </div>
+            <ul class="mt-3 overflow-hidden rounded-lg border border-border bg-card" aria-hidden="true">
+              @for (row of skeletonRows; track row.width) {
+                <li
+                  class="flex items-center gap-3 border-b border-border px-4 py-3
+                    last:border-b-0"
+                >
+                  <app-skeleton class="size-3.5 rounded" />
+                  <app-skeleton class="h-3" [style.width.%]="row.width" />
+                  <app-skeleton class="ml-auto h-2.5 w-14" />
+                </li>
+              }
+            </ul>
 
-          <nav class="mt-5 flex gap-1 border-b border-border" aria-label="Administration sections">
-            @for (tab of tabs; track tab.path) {
-              <a
-                [routerLink]="tab.path"
-                routerLinkActive="border-primary text-foreground"
-                [routerLinkActiveOptions]="{ exact: true }"
-                class="-mb-px cursor-pointer border-b-2 border-transparent px-3 py-2
-                  text-sm font-medium text-muted-foreground transition-colors
-                  hover:border-border hover:text-foreground"
+            <span class="sr-only" role="status">Loading recent activity.</span>
+          } @else if (activity.isEmpty()) {
+            <!--
+              Its own panel rather than the shared empty state inside one.
+
+              The shared empty state is a centred icon, a heading and a sentence, which
+              suits a page with nothing else on it. Here the list is one section of a
+              screen that already has figures above it, so a second centred block would
+              read as another thing that failed to load. A bordered panel with a line
+              of copy and the one action that changes it says "this is empty" without
+              competing with the numbers.
+            -->
+            <div
+              class="mt-3 flex items-center gap-3 rounded-lg border border-border
+                bg-card px-4 py-4"
+            >
+              <span
+                class="flex size-9 shrink-0 items-center justify-center rounded-full
+                  bg-muted text-muted-foreground"
               >
-                {{ tab.label }}
-              </a>
-            }
-          </nav>
+                <app-icon name="clock" [size]="17" />
+              </span>
 
-          <div class="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            @for (stat of stats; track stat.label) {
-              <app-stat-card
-                [label]="stat.label"
-                [value]="stat.value"
-                [detail]="stat.detail"
-                [icon]="stat.icon"
-              />
-            }
-          </div>
-
-          <div class="mt-8 grid gap-4 lg:grid-cols-2">
-            <section class="rounded-lg border border-border bg-card p-4">
-              <h2 class="font-headings text-sm font-semibold text-foreground">Recent questions</h2>
-
-              <ul class="mt-3 flex flex-col">
-                @for (log of recentLogs(); track log.id) {
-                  <li class="flex items-start gap-2 border-b border-border py-2.5 last:border-b-0">
-                    <app-badge [tone]="outcomeTones[log.outcome]" class="shrink-0">
-                      {{ outcomeLabels[log.outcome] }}
-                    </app-badge>
-                    <p class="min-w-0 flex-1 text-sm text-foreground">{{ log.question }}</p>
-                  </li>
-                }
-              </ul>
-
-              <a
-                routerLink="/admin/questions"
-                class="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary
-                  hover:underline"
-              >
-                View all logs
-                <app-icon name="arrow-up-right" [size]="13" />
-              </a>
-            </section>
-
-            <section class="rounded-lg border border-border bg-card p-4">
-              <h2 class="font-headings text-sm font-semibold text-foreground">Indexing status</h2>
-
-              <div class="mt-3 flex flex-col gap-2.5">
-                <p class="flex items-center gap-2 text-sm text-foreground">
-                  <app-icon name="check-circle-2" [size]="15" class="shrink-0 text-primary" />
-                  {{ indexedCount() }} documents indexed
-                </p>
-
-                @if (processingCount() > 0) {
-                  <p class="flex items-center gap-2 text-sm text-foreground">
-                    <app-icon
-                      name="loader-2"
-                      [size]="15"
-                      class="shrink-0 animate-spin text-warning"
-                    />
-                    {{ processingCount() }} still indexing
-                  </p>
-                }
-
-                @if (failedCount() > 0) {
-                  <p class="flex items-center gap-2 text-sm text-foreground">
-                    <app-icon name="alert-triangle" [size]="15" class="shrink-0 text-danger" />
-                    {{ failedCount() }} need attention
-                  </p>
-                }
-              </div>
-
-              <!--
-                The figure is derived from the documents listed above, not asserted,
-                so an administrator can check it against the rows.
-              -->
-              <div class="mt-4 border-t border-border pt-3">
-                <div class="flex items-baseline justify-between gap-2">
-                  <span class="text-xs text-muted-foreground">Knowledge base health</span>
-                  <span class="text-sm font-semibold tabular-nums text-foreground">
-                    {{ health() }}%
-                  </span>
-                </div>
-                <div class="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
-                  <div class="h-full rounded-full bg-primary" [style.width.%]="health()"></div>
-                </div>
-              </div>
-
-              <a
-                routerLink="/admin/documents"
-                class="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary
-                  hover:underline"
-              >
-                Manage documents
-                <app-icon name="arrow-up-right" [size]="13" />
-              </a>
-            </section>
-          </div>
-
-          <section class="mt-8 pb-4">
-            <h2 class="font-headings text-sm font-semibold text-foreground">Recent activity</h2>
-
+              <p class="min-w-0 flex-1 text-sm text-muted-foreground">
+                Nothing yet. Access requests, and questions asked from this browser,
+                will show up here.
+              </p>
+            </div>
+          } @else {
             <ul class="mt-3 overflow-hidden rounded-lg border border-border bg-card">
-              @for (activity of activity; track activity.id) {
+              @for (item of activity.items(); track item.id) {
                 <li
                   class="flex items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
                 >
-                  <app-icon name="clock" [size]="14" class="shrink-0 text-muted-foreground" />
+                  <app-icon [name]="item.icon" [size]="14" class="shrink-0 text-muted-foreground" />
                   <p class="min-w-0 flex-1 truncate text-sm text-foreground">
-                    <span class="font-medium">{{ activity.actor }}</span>
-                    {{ activity.summary }}
+                    <span class="font-medium">{{ item.actor }}</span>
+                    {{ item.summary }}
                   </p>
                   <span class="shrink-0 text-xs text-muted-foreground">
-                    {{ relativeTime(activity.createdAt) }}
+                    {{ relativeTime(item.createdAt) }}
                   </span>
                 </li>
               }
             </ul>
-          </section>
-        </div>
+          }
+        </section>
       </div>
     } @else {
       <app-admin-access-required />
     }
   `,
 })
-export class AdminDashboardViewComponent {
-  /** The viewer, which decides whether this area is open at all. */
-  protected readonly viewer = inject(ViewerService);
+export class AdminDashboardViewComponent implements OnInit {
+  /** Who is signed in, which decides whether this area is open at all. */
+  protected readonly auth = inject(AuthService);
 
-  /** Headline numbers. */
-  protected readonly stats = MOCK_ADMIN_STATS;
+  /** The live figures and the activity behind them. */
+  protected readonly activity = inject(ActivityService);
 
-  /** The administration screens, as tabs. */
-  protected readonly tabs = TABS;
+  /**
+   * Placeholder rows, at uneven widths.
+   *
+   * Uneven because four bars the same length read as a table, and this is a list of
+   * sentences of different lengths. The widths are the ones the real rows tend to.
+   */
+  protected readonly skeletonRows = [{ width: 58 }, { width: 72 }, { width: 44 }, { width: 66 }];
 
-  /** Recent events. */
-  protected readonly activity = MOCK_ADMIN_ACTIVITY;
-
-  /** Colours for each question outcome, matching the log list. */
-  protected readonly outcomeTones = OUTCOME_TONES;
-
-  /** Labels for each question outcome. */
-  protected readonly outcomeLabels = QUESTION_OUTCOME_LABELS;
-
-  /** The newest questions, which is what an administrator opens this screen for. */
-  protected readonly recentLogs = computed(() => MOCK_QUESTION_LOGS.slice(0, 4));
-
-  /** Documents that are ready to answer from. */
-  protected readonly indexedCount = computed(
-    () => MOCK_DOCUMENTS.filter((document) => document.status === 'indexed').length,
-  );
-
-  /** Documents still being embedded. */
-  protected readonly processingCount = computed(
-    () => MOCK_DOCUMENTS.filter((document) => document.status === 'processing').length,
-  );
-
-  /** Documents whose ingest failed, which is what needs a person. */
-  protected readonly failedCount = computed(
-    () => MOCK_DOCUMENTS.filter((document) => document.status === 'failed').length,
+  /**
+   * What the document figure is counting.
+   *
+   * Says "not indexed yet" rather than a zero, because an empty list here means the
+   * corpus has not been built rather than that the company has no documents.
+   */
+  protected readonly documentDetail = computed(() =>
+    this.activity.documentCount() === 0 ? 'Nothing indexed yet' : 'Available to answer from',
   );
 
   /**
-   * The share of settled documents ready to answer from, as a whole percentage.
+   * What the waiting figure means, which differs by whether there is anybody.
    *
-   * Counted rather than asserted, so the figure can be traced back to the rows
-   * above it. Documents still indexing are left out of the denominator entirely:
-   * a gap that is expected to close on its own is not a problem, and charging an
-   * administrator for it would train them to ignore the number. One that failed is
-   * counted, because nothing else will close it.
-   *
-   * With nothing settled yet there is no share to report, and 0 is the safer
-   * direction to be wrong in: the line above says what is still indexing.
+   * The zero is the case that matters: "nobody is waiting" is good news an
+   * administrator can stop thinking about, and it should not read like a problem.
    */
-  protected readonly health = computed(() => {
-    const settled = this.indexedCount() + this.failedCount();
+  protected readonly pendingDetail = computed(() =>
+    this.activity.pendingRequestCount() === 0
+      ? 'Nobody is waiting'
+      : 'Asked for an account',
+  );
 
-    return settled === 0 ? 0 : Math.round((this.indexedCount() / settled) * 100);
-  });
+  ngOnInit(): void {
+    this.activity.load();
+  }
+
+  /**
+   * A count as the card renders it.
+   *
+   * The card's value is a string so a figure that cannot be counted can say so. That
+   * is a presentational concern, so the conversion happens here rather than in the
+   * service, which deals in counts and has no business formatting them.
+   */
+  protected asText(count: number): string {
+    return String(count);
+  }
 
   /** When an event happened, as a reader would say it. */
   protected relativeTime(isoDate: string): string {

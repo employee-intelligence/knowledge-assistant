@@ -1,12 +1,12 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import { MOCK_QUESTION_LOGS } from '../../core/data/mock-admin.data';
-import { ViewerService } from '../../core/services/viewer.service';
+import { AuthServiceStub, provideAuthStub } from '../../core/testing/auth-service.stub';
 import { AdminQuestionLogsViewComponent } from './admin-question-logs-view.component';
 
 describe('AdminQuestionLogsViewComponent', () => {
   let fixture: ComponentFixture<AdminQuestionLogsViewComponent>;
-  let viewer: ViewerService;
+  let auth: AuthServiceStub;
 
   const element = (): HTMLElement => fixture.nativeElement as HTMLElement;
 
@@ -22,14 +22,17 @@ describe('AdminQuestionLogsViewComponent', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [AdminQuestionLogsViewComponent],
+      // The role comes from the backend now, so a test supplies it rather than
+      // flipping a switch inside the app.
+      providers: [provideAuthStub()],
     }).compileComponents();
 
     fixture = TestBed.createComponent(AdminQuestionLogsViewComponent);
-    viewer = TestBed.inject(ViewerService);
+    auth = TestBed.inject(AuthServiceStub);
   });
 
   it('opens the log behind a row', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
 
     rows()[0].click();
@@ -41,7 +44,7 @@ describe('AdminQuestionLogsViewComponent', () => {
   });
 
   it('keeps the open log readable when a filter hides it from the list', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
 
     rows()[0].click();
@@ -63,20 +66,22 @@ describe('AdminQuestionLogsViewComponent', () => {
   });
 
   it('closes the drawer on request', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
 
     rows()[0].click();
     await render();
 
-    (element().querySelector('button[aria-label="Close question log"]') as HTMLButtonElement).click();
+    (
+      element().querySelector('button[aria-label="Close question log"]') as HTMLButtonElement
+    ).click();
     await render();
 
     expect(fixture.componentInstance['openLogId']()).toBeNull();
   });
 
   it('shows access required rather than the log to an employee', async () => {
-    viewer.setPreviewRole('employee');
+    auth.setRole('employee');
     await render();
 
     expect(element().querySelector('app-question-log-table')).toBeNull();

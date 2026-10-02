@@ -1,6 +1,7 @@
-import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
 import { Router } from '@angular/router';
 
+import { AuthService } from '../../core/services/auth.service';
 import { ChatService } from '../../core/services/chat.service';
 import { QuestionInputComponent } from '../../features/ask/components/question-input/question-input.component';
 import { SuggestionListComponent } from '../../features/ask/components/suggestion-list/suggestion-list.component';
@@ -22,10 +23,14 @@ import { STARTER_QUESTIONS } from '../../shared/utils/constants';
 
     <div class="scrollbar-thin flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-8">
       <div class="flex w-full max-w-2xl flex-col items-center">
-        <h2 class="font-headings text-2xl font-semibold text-foreground">How can I help?</h2>
-        <p class="mt-2 max-w-[440px] text-center text-sm leading-relaxed text-muted-foreground">
-          Ask me anything about company policies, onboarding, IT setup, or internal documentation.
-        </p>
+        <!--
+          The first name, not the full name. This is the first thing on the screen and
+          it is the only place in the app that greets, so it is the only place the
+          greeting has to be right.
+        -->
+        <h2 class="text-center font-headings text-2xl font-semibold text-foreground">
+          How can I help{{ firstName() ? ', ' + firstName() : '' }}?
+        </h2>
 
         <div class="mt-6 w-full max-w-[520px]">
           <app-suggestion-list [suggestions]="starterQuestions" (chosen)="onAsk($event)" />
@@ -42,8 +47,20 @@ export class DashboardViewComponent {
   /** Current conversation state, including the loading flag for the composer. */
   protected readonly chat = inject(ChatService);
 
+  /** Who is signed in, which is what the greeting names. */
+  private readonly auth = inject(AuthService);
+
   /** Starter prompts, which are product copy rather than data from the backend. */
   protected readonly starterQuestions = STARTER_QUESTIONS;
+
+  /**
+   * The signed-in person's first name, or nothing.
+   *
+   * Empty rather than the whole name, and empty rather than a placeholder: before the
+   * session resolves the greeting is simply "How can I help?", which is correct at
+   * every point where the name is not yet known.
+   */
+  protected readonly firstName = computed(() => this.auth.user()?.name.trim().split(/\s+/)[0] ?? '');
 
   private readonly router = inject(Router);
 

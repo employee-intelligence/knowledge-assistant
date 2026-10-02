@@ -24,6 +24,11 @@ interface Citation extends SourceReference {
  * A grounded answer: the answer text and its citations. Copy sits in the top
  * right corner and stays out of the way until the answer is hovered or the
  * control itself is focused, so the answer text carries the whole card.
+ *
+ * While the answer is streaming the card shows a caret at the end of the text, and
+ * only then: the copy control is hidden, so the right padding that keeps the last
+ * line clear of it is not reserved either, which is what lets the caret sit against
+ * the final character rather than 64px away from it.
  */
 @Component({
   selector: 'app-answer-card',
@@ -49,14 +54,21 @@ interface Citation extends SourceReference {
         {{ hasCopied() ? 'Copied' : 'Copy' }}
       </button>
 
-      <div class="answer-prose pr-16 text-sm leading-relaxed text-foreground" [innerHTML]="html()"></div>
-
-      @if (isStreaming()) {
-        <span
-          class="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-foreground align-text-bottom"
-          aria-hidden="true"
-        ></span>
-      }
+      <!--
+        The typing cursor is this element's is-streaming class rather than a node
+        after the text: the prose is one block of innerHTML, so anything placed after
+        it is a sibling of the whole answer and draws below the last line instead of
+        beside the last character. The rule lives in the stylesheet, keyed on the
+        last child's after pseudo-element, which puts the caret at the end of the
+        final line and guarantees there is only ever one of it. Nothing about it
+        touches the message.
+      -->
+      <div
+        class="answer-prose text-sm leading-relaxed text-foreground"
+        [class.is-streaming]="isStreaming()"
+        [class.pr-16]="!isStreaming()"
+        [innerHTML]="html()"
+      ></div>
 
       @if (grounding(); as summary) {
         <p class="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">

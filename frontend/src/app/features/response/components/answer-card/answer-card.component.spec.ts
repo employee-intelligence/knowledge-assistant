@@ -123,4 +123,46 @@ describe('AnswerCardComponent', () => {
 
     expect(element().textContent).toContain('Grounded in 2 documents');
   });
+
+  describe('while the answer is streaming', () => {
+    const prose = (): HTMLElement =>
+      element().querySelector('.answer-prose') as HTMLElement;
+
+    beforeEach(async () => {
+      message = answeredMessage({ status: 'pending', text: 'You accrue 25 days', sources: [] });
+      streaming = true;
+      await render();
+    });
+
+    it('marks the text rather than adding a node beside it', () => {
+      // A node after the prose would be a sibling of the whole answer and draw below
+      // the last line, which is the bug this replaced.
+      expect(prose().classList.contains('is-streaming')).toBe(true);
+      expect(element().querySelector('.answer-prose ~ span')).toBeNull();
+    });
+
+    it('keeps the cursor out of the message itself', () => {
+      // It is generated content keyed off the text, so it cannot be part of what is
+      // stored, copied, or re-rendered as the finished answer.
+      expect(message.text).not.toContain('|');
+      expect(prose().textContent).not.toContain('|');
+      expect(prose().innerHTML).not.toContain('|');
+    });
+
+    it('does not reserve the room the copy control needs, which is hidden anyway', () => {
+      // Otherwise the cursor trails the text by 64px on the last line.
+      expect(element().querySelector('button[aria-label], button')?.hasAttribute('hidden')).toBe(
+        true,
+      );
+      expect(prose().classList.contains('pr-16')).toBe(false);
+    });
+
+    it('drops the cursor entirely once streaming stops', async () => {
+      streaming = false;
+      await render();
+
+      expect(prose().classList.contains('is-streaming')).toBe(false);
+      expect(prose().textContent).not.toContain('|');
+    });
+  });
 });

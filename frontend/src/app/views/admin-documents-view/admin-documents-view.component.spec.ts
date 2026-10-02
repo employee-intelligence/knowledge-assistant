@@ -1,12 +1,12 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { vi } from 'vitest';
 
-import { ViewerService } from '../../core/services/viewer.service';
+import { AuthServiceStub, provideAuthStub } from '../../core/testing/auth-service.stub';
 import { AdminDocumentsViewComponent } from './admin-documents-view.component';
 
 describe('AdminDocumentsViewComponent', () => {
   let fixture: ComponentFixture<AdminDocumentsViewComponent>;
-  let viewer: ViewerService;
+  let auth: AuthServiceStub;
 
   const element = (): HTMLElement => fixture.nativeElement as HTMLElement;
 
@@ -19,8 +19,7 @@ describe('AdminDocumentsViewComponent', () => {
   const rows = (): number => element().querySelectorAll('app-document-table > div > div').length;
 
   /** The inventory alone, so a message about a deleted document is not a row. */
-  const tableText = (): string =>
-    element().querySelector('app-document-table')?.textContent ?? '';
+  const tableText = (): string => element().querySelector('app-document-table')?.textContent ?? '';
 
   /** The delete control on a row. */
   const deleteControl = (): HTMLButtonElement =>
@@ -62,14 +61,17 @@ describe('AdminDocumentsViewComponent', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [AdminDocumentsViewComponent],
+      // The role comes from the backend now, so a test supplies it rather than
+      // flipping a switch inside the app.
+      providers: [provideAuthStub()],
     }).compileComponents();
 
     fixture = TestBed.createComponent(AdminDocumentsViewComponent);
-    viewer = TestBed.inject(ViewerService);
+    auth = TestBed.inject(AuthServiceStub);
   });
 
   it('closes the area to an employee', async () => {
-    viewer.setPreviewRole('employee');
+    auth.setRole('employee');
     await render();
 
     // The route is reachable by typing it, so the screen has to explain itself
@@ -80,7 +82,7 @@ describe('AdminDocumentsViewComponent', () => {
   });
 
   it('lists the inventory for an administrator', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
 
     expect(element().querySelector('app-admin-access-required')).toBeFalsy();
@@ -89,7 +91,7 @@ describe('AdminDocumentsViewComponent', () => {
   });
 
   it('shows a running ingest as running rather than as a settled state', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
 
     // A file still being embedded is not "Indexed" and not a failure, and the
@@ -99,20 +101,20 @@ describe('AdminDocumentsViewComponent', () => {
   });
 
   it('offers a retry only on the row that failed', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
 
     // Named by the button's own label, so adding another row action later cannot
     // make this pass by counting the wrong buttons.
     const retry = element().querySelectorAll<HTMLButtonElement>('app-document-table button');
 
-    expect(Array.from(retry).filter((button) => button.textContent?.trim() === 'Retry')).toHaveLength(
-      1,
-    );
+    expect(
+      Array.from(retry).filter((button) => button.textContent?.trim() === 'Retry'),
+    ).toHaveLength(1);
   });
 
   it('filters the inventory as the search term changes', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
     const before = rows();
 
@@ -124,7 +126,7 @@ describe('AdminDocumentsViewComponent', () => {
   });
 
   it('falls back to an empty state when nothing matches', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
 
     typeSearch('zzzz');
@@ -135,7 +137,7 @@ describe('AdminDocumentsViewComponent', () => {
   });
 
   it('only removes a document once the dialog is confirmed', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
     const before = rows();
 
@@ -157,7 +159,7 @@ describe('AdminDocumentsViewComponent', () => {
   });
 
   it('leaves the document in place when the dialog is dismissed', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
     const before = rows();
 
@@ -174,7 +176,7 @@ describe('AdminDocumentsViewComponent', () => {
   });
 
   it('says a delete only touched the preview list', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
 
     deleteControl().click();
@@ -188,7 +190,7 @@ describe('AdminDocumentsViewComponent', () => {
   });
 
   it('refuses a file the panel does not claim to support', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
     const before = rows();
 
@@ -198,13 +200,11 @@ describe('AdminDocumentsViewComponent', () => {
     // Rejected by extension, in the browser, before anything is read: the file is
     // named in the refusal so the reader knows which one was turned away.
     expect(rows()).toBe(before);
-    expect(element().querySelector('app-document-dropzone')?.textContent).toContain(
-      'payload.exe',
-    );
+    expect(element().querySelector('app-document-dropzone')?.textContent).toContain('payload.exe');
   });
 
   it('says nothing was transmitted when a file is taken in', async () => {
-    viewer.setPreviewRole('administrator');
+    auth.setRole('admin');
     await render();
 
     // The preview runs on a clock, so it is run on a fake one: the bar is driven

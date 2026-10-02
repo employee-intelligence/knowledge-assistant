@@ -31,6 +31,10 @@ const SIZE_CLASSES: Record<number, string> = {
     class:
       'inline-flex shrink-0 items-center justify-center rounded-full font-semibold select-none',
     '[class]': 'classes()',
+    // Initials alone say nothing to a screen reader, and the sidebar avatar now
+    // stands without the name beside it, so the label is what names the person.
+    '[attr.aria-label]': 'label()',
+    '[attr.title]': 'label()',
   },
   template: '{{ initials() }}',
 })

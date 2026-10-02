@@ -1,4 +1,3 @@
-import type { IconName } from '../../shared/components/icon/icon.component';
 import type { PolicyDocument } from '../models/document.model';
 import type { QuestionLog } from '../models/question-log.model';
 
@@ -8,22 +7,6 @@ const DAY = 24 * HOUR;
 /** An ISO timestamp a number of days and hours before the app loads. */
 function ago(days: number, hours = 0): string {
   return new Date(Date.now() - days * DAY - hours * HOUR).toISOString();
-}
-
-/** One headline number on the administrator dashboard. */
-export interface AdminStat {
-  label: string;
-  value: string;
-  detail: string;
-  icon: IconName;
-}
-
-/** A recent event shown on the administrator dashboard. */
-export interface AdminActivity {
-  id: string;
-  summary: string;
-  actor: string;
-  createdAt: string;
 }
 
 /** Placeholder inventory shown while document management is unbuilt. */
@@ -246,61 +229,5 @@ export const MOCK_QUESTION_LOGS: QuestionLog[] = [
     answer: null,
     sources: [],
     durationMs: 90000,
-  },
-];
-
-/** Headline numbers for the administrator dashboard. */
-export const MOCK_ADMIN_STATS: AdminStat[] = [
-  {
-    label: 'Documents',
-    value: '7',
-    detail: '6 indexed, 1 needs attention',
-    icon: 'file-text',
-  },
-  {
-    label: 'Questions this week',
-    value: '128',
-    detail: '92% answered from policy',
-    icon: 'message-square-text',
-  },
-  {
-    label: 'Unanswered',
-    value: '10',
-    detail: 'Flagged for a policy gap',
-    icon: 'alert-triangle',
-  },
-  {
-    label: 'Active people',
-    value: '42',
-    detail: 'Across 6 teams',
-    icon: 'users',
-  },
-];
-
-/** Recent events for the administrator dashboard. */
-export const MOCK_ADMIN_ACTIVITY: AdminActivity[] = [
-  {
-    id: 'act-1',
-    summary: 'uploaded Remote Work Policy',
-    actor: 'Ama Konadu',
-    createdAt: ago(0, 2),
-  },
-  {
-    id: 'act-2',
-    summary: 'reported a failed ingestion for Payroll & Compensation Policy',
-    actor: 'Kwame Osei',
-    createdAt: ago(1, 5),
-  },
-  {
-    id: 'act-3',
-    summary: 're-indexed Security & Compliance Standards',
-    actor: 'Efua Danso',
-    createdAt: ago(3, 1),
-  },
-  {
-    id: 'act-4',
-    summary: 'added IT Equipment & VPN Guide',
-    actor: 'Yaw Boateng',
-    createdAt: ago(9),
   },
 ];

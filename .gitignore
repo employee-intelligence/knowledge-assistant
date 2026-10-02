@@ -1,3 +1,11 @@
 .env
 .idea
+.vscode
 node_modules
+history.db
+
+# Local SQLite databases. They hold password hashes and conversation text, so they
+# are never committed; the deployed data lives in Neon.
+backend/*.db
+backend/*.sqlite
+backend/*.sqlite3
