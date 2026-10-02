@@ -8,6 +8,7 @@ import { QuestionInputComponent } from '../../features/ask/components/question-i
 import { ViewHeaderComponent } from '../../features/chat/components/view-header/view-header.component';
 import { AnswerPendingComponent } from '../../features/response/components/answer-pending/answer-pending.component';
 import { ChatThreadComponent } from '../../features/response/components/chat-thread/chat-thread.component';
+import { SkeletonComponent } from '../../shared/components/skeleton/skeleton.component';
 
 /**
  * Shows one conversation: its whole thread and the composer for follow-up
@@ -25,6 +26,7 @@ import { ChatThreadComponent } from '../../features/response/components/chat-thr
     AnswerPendingComponent,
     ChatThreadComponent,
     QuestionInputComponent,
+    SkeletonComponent,
     ViewHeaderComponent,
   ],
   host: { class: 'flex min-h-0 flex-1 flex-col' },
@@ -41,8 +43,16 @@ import { ChatThreadComponent } from '../../features/response/components/chat-thr
            message, so it is hidden from assistive tech and the live region says
            what is happening once. -->
       <div class="mx-auto w-full max-w-thread flex-1 space-y-5 px-4 py-6 sm:px-6 lg:px-8">
+        <!--
+          Shaped from MessageBubbleComponent: the same rounded-br-sm corner, the same
+          padding, and a bar the height of one line of body text. The old placeholder
+          used the top-right corner and a muted fill, so the real bubble arrived with a
+          different shape and a different colour and the page visibly corrected itself.
+        -->
         <div class="flex justify-end" aria-hidden="true">
-          <div class="h-3.5 w-1/3 animate-pulse rounded-lg rounded-tr-sm bg-secondary-soft"></div>
+          <div class="max-w-[320px] rounded-lg rounded-br-sm bg-primary/15 px-4 py-3">
+            <app-skeleton class="h-5 w-full rounded bg-primary/25" />
+          </div>
         </div>
 
         <app-answer-pending />

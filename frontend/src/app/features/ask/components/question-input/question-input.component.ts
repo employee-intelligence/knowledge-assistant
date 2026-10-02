@@ -41,8 +41,9 @@ import { MAX_QUESTION_LENGTH, MIN_QUESTION_LENGTH, QUESTION_PLACEHOLDER } from '
           [placeholder]="placeholder"
           [attr.maxlength]="maxLength"
           aria-label="Ask a question about company policies"
-          class="block max-h-32 min-h-9 w-full resize-none bg-transparent py-2 text-sm
-            text-foreground placeholder:text-muted-foreground focus:outline-none"
+          class="block max-h-32 min-h-9 w-full resize-none bg-transparent py-2 pr-send text-sm
+            text-foreground placeholder:text-center placeholder:text-muted-foreground
+            focus:outline-none"
           (input)="autoGrow($event)"
           (keydown.enter)="onEnter($event)"
         ></textarea>

@@ -1,25 +1,30 @@
+import { provideHttpClient } from '@angular/common/http';
+import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 
+import { API_BASE_URL } from '../../../../core/api.config';
 import { RegisterViewComponent } from './register-view.component';
+
+const DOMAIN = 'acmetech.example';
 
 describe('RegisterViewComponent', () => {
   let fixture: ComponentFixture<RegisterViewComponent>;
+  let http: HttpTestingController;
 
   const element = (): HTMLElement => fixture.nativeElement as HTMLElement;
+  const fields = (): HTMLInputElement[] =>
+    Array.from(element().querySelectorAll<HTMLInputElement>('app-form-field input'));
 
   const render = async (): Promise<void> => {
     fixture.detectChanges();
     await fixture.whenStable();
   };
 
-  /** The form's fields, in the order they are declared. */
-  const field = (index: number): HTMLInputElement =>
-    element().querySelectorAll<HTMLInputElement>('app-form-field input')[index];
-
   const type = (index: number, value: string): void => {
-    field(index).value = value;
-    field(index).dispatchEvent(new Event('input'));
+    fields()[index].value = value;
+    fields()[index].dispatchEvent(new Event('input'));
+    fixture.detectChanges();
   };
 
   const submit = async (): Promise<void> => {
@@ -29,101 +34,154 @@ describe('RegisterViewComponent', () => {
     await render();
   };
 
+  const fillValid = (): void => {
+    type(0, 'Kofi Mensah');
+    type(1, `kofi@${DOMAIN}`);
+  };
+
+  /** The one request this screen can make. */
+  const REQUEST_URL = `${API_BASE_URL}/api/auth/request-access`;
+
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [RegisterViewComponent],
-      // The link back to sign-in is a real routerLink, so the router has to exist.
-      providers: [provideRouter([])],
+      providers: [provideRouter([]), provideHttpClient(), provideHttpClientTesting()],
     }).compileComponents();
 
     fixture = TestBed.createComponent(RegisterViewComponent);
+    http = TestBed.inject(HttpTestingController);
+    await render();
   });
 
-  it('asks for the four things the design lists, in order', async () => {
-    await render();
-
-    // The required marker is stripped so the assertion is about which fields
-    // exist and in what order, not about how the required state is drawn.
-    const labels = Array.from(element().querySelectorAll('app-form-field label')).map((label) =>
-      (label.textContent ?? '').replace('*', '').trim(),
-    );
-
-    expect(labels).toEqual(['Full name', 'Work email', 'Password', 'Confirm']);
+  it('asks for a name and an address, and nothing else', async () => {
+    // No password, and no confirmation. That absence is the whole difference between
+    // asking for access and registering: there is nothing here to set a password with.
+    expect(element().textContent).toContain('Request access');
+    expect(fields().length).toBe(2);
+    expect(fields().map((field) => field.type)).toEqual(['text', 'email']);
+    expect(element().textContent).not.toContain('Password');
   });
 
-  it('names every empty field on the first attempt', async () => {
-    await render();
+  it('says the account is not created yet, so nobody expects to be signed in', async () => {
+    fillValid();
     await submit();
 
-    expect(element().textContent).toContain('Enter your name');
-    expect(element().textContent).toContain('Enter your work email');
-    expect(element().textContent).toContain('Choose a password');
-    expect(element().textContent).toContain('Repeat your password');
-  });
-
-  it('says a confirmation does not match rather than that it is missing', async () => {
+    http.expectOne(REQUEST_URL).flush({ status: 'received' });
     await render();
 
-    type(0, 'Sarah Mensah');
-    type(1, 'sarah.mensah@company.com');
-    type(2, 'correct horse');
-    type(3, 'battery staple');
-    await submit();
-
-    // A mismatch is a different mistake from an empty field, and telling somebody
-    // their confirmation is missing when they filled it in sends them looking in
-    // the wrong place.
-    expect(element().textContent).toContain('Those passwords do not match');
-    expect(element().textContent).not.toContain('Repeat your password');
+    // The one thing that must not be implied: that filling this in signed anybody in.
+    expect(element().textContent).toContain('an administrator will review');
+    expect(element().textContent).not.toContain('you are now signed in');
+    expect(element().querySelector('app-form-field')).toBeNull();
   });
 
-  it('rejects a short password before the confirmation is even looked at', async () => {
-    await render();
-
-    type(0, 'Sarah Mensah');
-    type(1, 'sarah.mensah@company.com');
-    type(2, 'short');
-    type(3, 'short');
+  it('sends the name and the address, trimmed', async () => {
+    type(0, '  Kofi Mensah  ');
+    type(1, `  kofi@${DOMAIN}  `);
     await submit();
 
-    expect(element().textContent).toContain('Use at least 8 characters');
+    const request = http.expectOne(REQUEST_URL);
+
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toEqual({ name: 'Kofi Mensah', email: `kofi@${DOMAIN}` });
+    request.flush({ status: 'received' });
   });
 
-  it('rejects an address with no @ without demanding a stricter shape', async () => {
-    await render();
-
-    type(0, 'Sarah Mensah');
-    type(1, 'sarah at company');
-    type(2, 'correct horse');
-    type(3, 'correct horse');
+  it('carries no role, because the person asking does not get to choose one', async () => {
+    fillValid();
     await submit();
 
-    // Deliberately loose. A pattern strict enough to be sure is also strict enough
-    // to refuse an address that works, which is the worse failure.
+    // The backend has no field for it either, so sending one would be meaningless —
+    // but the shape of what is sent is worth pinning, since a role here would be the
+    // whole security property of the request flow.
+    const request = http.expectOne(REQUEST_URL);
+
+    expect(Object.keys(request.request.body as object).sort()).toEqual(['email', 'name']);
+    request.flush({ status: 'received' });
+  });
+
+  it('refuses an address outside the company before making a round trip', async () => {
+    fillValid();
+    type(1, 'kofi@gmail.com');
+    await submit();
+
+    expect(element().textContent).toContain(`Use your @${DOMAIN} work email`);
+    http.expectNone(REQUEST_URL);
+  });
+
+  it('refuses something that is not an address at all', async () => {
+    fillValid();
+    type(1, 'kofi');
+    await submit();
+
     expect(element().textContent).toContain('does not look like an email address');
+    http.expectNone(REQUEST_URL);
   });
 
-  it('admits that no account was created', async () => {
-    await render();
+  it('complains about empty fields only once the form is sent', async () => {
+    expect(element().textContent).not.toContain('Enter your full name');
 
-    type(0, 'Sarah Mensah');
-    type(1, 'sarah.mensah@company.com');
-    type(2, 'correct horse');
-    type(3, 'correct horse');
     await submit();
 
-    expect(element().textContent).toContain('Creating account…');
-
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    await render();
-
-    expect(element().textContent).toContain('no account was created');
-    expect(element().textContent).not.toContain('Creating account…');
+    expect(element().textContent).toContain('Enter your full name');
+    expect(element().textContent).toContain('Enter your work email');
+    http.expectNone(REQUEST_URL);
   });
 
-  it('offers a way back to signing in', async () => {
+  it("passes the backend's own refusals through, because both are actionable", async () => {
+    fillValid();
+    await submit();
+
+    // "You already have an account" is more use than a generic failure, and it comes
+    // from the only place that knows.
+    http
+      .expectOne(REQUEST_URL)
+      .flush(
+        { detail: 'There is already an account for that address. Sign in instead.' },
+        { status: 409, statusText: 'Conflict' },
+      );
     await render();
 
-    expect(element().querySelector('a[href="/login"]')?.textContent).toContain('Log in');
+    expect(element().textContent).toContain('already an account');
+    expect(element().querySelector('form')).not.toBeNull();
+  });
+
+  it('says so plainly when the attempt limit is reached', async () => {
+    fillValid();
+    await submit();
+
+    http
+      .expectOne(REQUEST_URL)
+      .flush({ detail: 'Too many attempts.' }, { status: 429, statusText: 'Too Many Requests' });
+    await render();
+
+    // The reader did nothing wrong, so the message must not read as though they had.
+    expect(element().textContent).toContain('Too many attempts');
+  });
+
+  it('reports a failure to reach the server rather than silently doing nothing', async () => {
+    fillValid();
+    await submit();
+
+    // Status 0 is what the browser reports for a request the network dropped, and it
+    // has to read as a failure: the form still sitting there unchanged would look
+    // like the request was never made.
+    http.expectOne(REQUEST_URL).flush({}, { status: 0, statusText: 'Unknown Error' });
+    await render();
+
+    expect(element().textContent).toContain('Could not reach the server');
+    expect(element().querySelector('form')).not.toBeNull();
+  });
+
+  it('offers a way back to signing in, and to a link they already have', async () => {
+    expect(element().querySelector('a[href="/login"]')).not.toBeNull();
+    expect(element().querySelector('a[href="/accept-invite"]')).not.toBeNull();
   });
 });
+
+// A placeholder used only to keep the spy above honest about what it is not doing.
+class RouterStub {
+  noop(): void {
+    /* deliberately empty */
+  }
+}

@@ -1,125 +1,157 @@
-import {
-  ChangeDetectionStrategy,
-  Component,
-  DestroyRef,
-  computed,
-  inject,
-  signal,
-} from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 
 import { ButtonComponent } from '../../../../shared/components/button/button.component';
 import { FormFieldComponent } from '../../../../shared/components/form-field/form-field.component';
 import { IconComponent } from '../../../../shared/components/icon/icon.component';
+import { COMPANY_EMAIL_DOMAIN, isCompanyEmail } from '../../../../core/models/auth.model';
+import { AuthService } from '../../../../core/services/auth.service';
 import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.component';
 
 /**
- * Account creation, for somebody who has no account yet.
+ * Asking for an account.
  *
- * The design draws this as a self-service form next to a footer that reads "SSO
- * enabled", which is a contradiction worth naming rather than quietly picking a
- * side on: if the workspace really does enforce single sign-on, this form is not
- * how anyone joins. It is built as drawn and collects nothing, because an account
- * created by a form that keeps no result is not an account.
+ * This is not registration, and the difference is the whole point of the screen. It
+ * creates a request that an administrator reads; it does not create an account, and
+ * it cannot. Nothing here is signed in, nothing gets a role, and nothing works until
+ * somebody approves it.
+ *
+ * The shape it replaces was a self-service form that would have let anyone who could
+ * type a colleague's company address claim that address — a domain check proves the
+ * address was typed, not that the mailbox is theirs. This way the person fills in one
+ * short form and an administrator decides, which is slower for them and correct for
+ * the company.
  */
 @Component({
   selector: 'app-register-view',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [AuthLayoutComponent, ButtonComponent, FormFieldComponent, IconComponent, RouterLink],
+  imports: [
+    AuthLayoutComponent,
+    ButtonComponent,
+    FormFieldComponent,
+    IconComponent,
+    ReactiveFormsModule,
+    RouterLink,
+  ],
   template: `
     <app-auth-layout>
-      <h1 class="font-headings text-xl font-semibold text-foreground">Create your account</h1>
-      <p class="mt-1 text-sm text-muted-foreground">
-        Join your company workspace to ask questions with cited answers.
+      <h1 class="text-center font-headings text-xl font-semibold text-foreground">
+        Request access
+      </h1>
+      <p class="mt-1 text-center text-sm text-muted-foreground">
+        Tell us who you are and an administrator will review it. You will get a link to set a
+        password once they do.
       </p>
 
-      <form class="mt-6 flex flex-col gap-4" (submit)="onSubmit($event)">
-        <app-form-field
-          label="Full name"
-          icon="user"
-          autocomplete="name"
-          placeholder="Sarah Mensah"
-          [required]="true"
-          [value]="name()"
-          [error]="nameError()"
-          (valueChange)="name.set($event)"
-        />
+      @if (isSent()) {
+        <div class="mt-6 flex flex-col items-center gap-4 text-center">
+          <p
+            class="flex items-start gap-2 rounded-md bg-success/10 px-3 py-2 text-xs
+              text-success"
+          >
+            <app-icon name="check-circle-2" [size]="14" class="mt-0.5 shrink-0" />
+            <span class="text-left">
+              Thanks — your request is with an administrator now. Watch for a link to set your
+              password.
+            </span>
+          </p>
 
-        <app-form-field
-          label="Work email"
-          type="email"
-          icon="mail"
-          autocomplete="email"
-          placeholder="name@company.com"
-          [required]="true"
-          [value]="email()"
-          [error]="emailError()"
-          (valueChange)="email.set($event)"
-        />
+          <a routerLink="/login" class="text-sm font-medium text-primary hover:underline">
+            Back to sign in
+          </a>
+        </div>
+      } @else {
+        <form class="mt-6 flex flex-col gap-4" [formGroup]="form" (ngSubmit)="onSubmit()">
+          <app-form-field
+            label="Full name"
+            [faintPlaceholder]="true"
+            icon="user"
+            autocomplete="name"
+            placeholder="Ama Konadu"
+            [required]="true"
+            [value]="name()"
+            [error]="nameError()"
+            (valueChange)="onNameChange($event)"
+          />
 
-        <app-form-field
-          label="Password"
-          type="password"
-          icon="lock"
-          autocomplete="new-password"
-          placeholder="At least 8 characters"
-          [required]="true"
-          [value]="password()"
-          [error]="passwordError()"
-          (valueChange)="password.set($event)"
-        />
+          <app-form-field
+            label="Work email"
+            [faintPlaceholder]="true"
+            type="email"
+            icon="mail"
+            autocomplete="email"
+            [placeholder]="'you@' + companyDomain"
+            [required]="true"
+            [value]="email()"
+            [error]="emailError()"
+            (valueChange)="onEmailChange($event)"
+          />
 
-        <app-form-field
-          label="Confirm"
-          type="password"
-          icon="lock"
-          autocomplete="new-password"
-          placeholder="Repeat your password"
-          [required]="true"
-          [value]="confirmation()"
-          [error]="confirmationError()"
-          (valueChange)="confirmation.set($event)"
-        />
+          <button app-button type="submit" size="lg" [fullWidth]="true" [disabled]="isSubmitting()">
+            @if (isSubmitting()) {
+              <app-icon name="loader-2" [size]="16" class="animate-spin" />
+              <span>Sending…</span>
+            } @else {
+              <span>Request access</span>
+            }
+          </button>
+        </form>
 
-        <button app-button type="submit" size="lg" [fullWidth]="true" [disabled]="isSubmitting()">
-          @if (isSubmitting()) {
-            <app-icon name="loader-2" [size]="16" class="animate-spin" />
-            <span>Creating account…</span>
-          } @else {
-            <span>Create account</span>
-          }
-        </button>
-      </form>
+        @if (notice()) {
+          <p
+            class="mt-4 flex items-start gap-2 rounded-md bg-danger/10 px-3 py-2 text-xs
+              text-danger"
+            role="alert"
+            >
+            <app-icon name="alert-triangle" [size]="14" class="mt-0.5 shrink-0" />
+            <span>{{ notice() }}</span>
+          </p>
+        }
 
-      @if (notice()) {
         <p
-          class="mt-4 flex items-start gap-2 rounded-md bg-muted px-3 py-2 text-xs
-            text-muted-foreground"
+          class="mt-6 flex flex-col items-center gap-2 border-t border-border pt-4 text-center
+            text-sm text-muted-foreground"
         >
-          <app-icon name="info" [size]="14" class="mt-0.5 shrink-0" />
-          <span>{{ notice() }}</span>
+          <span>Already have an account?</span>
+          <a routerLink="/login" class="font-medium text-primary hover:underline">Sign in</a>
+          <a routerLink="/accept-invite" class="text-xs text-muted-foreground hover:underline">
+            Have an invitation already? Set your password
+          </a>
         </p>
       }
-
-      <p class="mt-6 border-t border-border pt-4 text-center text-sm text-muted-foreground">
-        Already have an account?
-        <a routerLink="/login" class="font-medium text-primary hover:underline">Log in</a>
-      </p>
     </app-auth-layout>
   `,
 })
 export class RegisterViewComponent {
+  private readonly auth = inject(AuthService);
+  private readonly formBuilder = inject(FormBuilder);
+
+  /** The domain the field asks for, read from the one place it is written. */
+  protected readonly companyDomain = COMPANY_EMAIL_DOMAIN;
+
+  /**
+   * The form.
+   *
+   * Two fields and no password, which is the visible difference between asking for
+   * access and registering. There is deliberately nothing to type twice and nothing
+   * to keep: the password is set later, against an invitation, by whoever this is
+   * approved as.
+   *
+   * The address carries a domain check here because the field should say so before
+   * the round trip. It is a convenience — the server runs the same rule and is what
+   * decides.
+   */
+  protected readonly form = this.formBuilder.nonNullable.group({
+    name: ['', [Validators.required, Validators.maxLength(120)]],
+    email: ['', [Validators.required, Validators.email]],
+  });
+
   /** Full name as typed. */
   protected readonly name = signal('');
 
   /** Work email as typed. */
   protected readonly email = signal('');
-
-  /** Password as typed. */
-  protected readonly password = signal('');
-
-  /** Confirmation as typed. */
-  protected readonly confirmation = signal('');
 
   /** Whether the form has been sent, which is when fields start complaining. */
   private readonly submitted = signal(false);
@@ -127,100 +159,99 @@ export class RegisterViewComponent {
   /** Whether the request is in flight. */
   protected readonly isSubmitting = signal(false);
 
+  /** Whether the request has been accepted by the backend. */
+  protected readonly isSent = signal(false);
+
   /** Explanatory message shown after an attempt. */
   protected readonly notice = signal('');
 
-  private readonly destroyRef = inject(DestroyRef);
-
-  /** Pending request timer, cleared if the view goes away first. */
-  private pending: ReturnType<typeof setTimeout> | undefined;
-
   /** Name error, once the form has been sent. */
   protected readonly nameError = computed(() =>
-    this.submitted() && this.name().trim() === '' ? 'Enter your name' : '',
+    this.submitted() && this.name().trim() === '' ? 'Enter your full name' : '',
   );
 
-  /**
-   * Email error, once the form has been sent.
-   *
-   * Only a missing `@` is rejected. A stricter pattern would refuse the addresses
-   * that are real, and a form that blocks a valid address is worse than one that
-   * accepts something it should have caught.
-   */
+  /** Email error, once the form has been sent. */
   protected readonly emailError = computed(() => {
     if (!this.submitted()) {
       return '';
     }
 
     const value = this.email().trim();
+
     if (value === '') {
       return 'Enter your work email';
     }
+    if (this.form.controls.email.hasError('email')) {
+      return 'That does not look like an email address';
+    }
+    // Worth saying before the round trip, because a personal address is the likeliest
+    // mistake here and the server would refuse it anyway.
+    if (!isCompanyEmail(value)) {
+      return `Use your @${this.companyDomain} work email`;
+    }
 
-    return value.includes('@') ? '' : 'That does not look like an email address';
+    return '';
   });
 
-  /** Password error, once the form has been sent. */
-  protected readonly passwordError = computed(() => {
-    if (!this.submitted()) {
-      return '';
-    }
-
-    if (this.password() === '') {
-      return 'Choose a password';
-    }
-
-    return this.password().length < 8 ? 'Use at least 8 characters' : '';
-  });
-
-  /**
-   * Confirmation error.
-   *
-   * Compared after length, so an empty confirmation says it is missing rather than
-   * that it does not match: a mismatch implies there was something to match.
-   */
-  protected readonly confirmationError = computed(() => {
-    if (!this.submitted()) {
-      return '';
-    }
-
-    if (this.confirmation() === '') {
-      return 'Repeat your password';
-    }
-
-    return this.confirmation() === this.password() ? '' : 'Those passwords do not match';
-  });
-
-  /** Whether anything is wrong, which is what stops the request. */
-  private readonly hasError = computed(
-    () =>
-      this.nameError() !== '' ||
-      this.emailError() !== '' ||
-      this.passwordError() !== '' ||
-      this.confirmationError() !== '',
-  );
-
-  constructor() {
-    this.destroyRef.onDestroy(() => clearTimeout(this.pending));
+  protected onNameChange(value: string): void {
+    this.name.set(value);
+    this.form.controls.name.setValue(value);
   }
 
-  /**
-   * Pretends to create the account for a moment so the pending state can be
-   * reviewed, then reports that nothing was created.
-   */
-  protected onSubmit(event: Event): void {
-    event.preventDefault();
+  protected onEmailChange(value: string): void {
+    this.email.set(value);
+    this.form.controls.email.setValue(value);
+  }
+
+  protected onSubmit(): void {
     this.submitted.set(true);
     this.notice.set('');
 
-    if (this.hasError()) {
+    if (this.nameError() || this.emailError() || this.form.invalid) {
       return;
     }
 
     this.isSubmitting.set(true);
-    this.pending = setTimeout(() => {
-      this.isSubmitting.set(false);
-      this.notice.set('Accounts are not connected yet, so no account was created.');
-    }, 600);
+
+    this.auth
+      .requestAccess(this.form.controls.name.value, this.form.controls.email.value)
+      .subscribe({
+        next: () => {
+          this.isSubmitting.set(false);
+          this.isSent.set(true);
+        },
+        error: (error: unknown) => {
+          this.isSubmitting.set(false);
+          this.notice.set(readRequestFailure(error));
+        },
+      });
   }
+}
+
+/**
+ * What to say when a request is refused.
+ *
+ * The two 409s are the useful ones and both come from the backend rather than from
+ * here: there is already an account at that address, or a request is already
+ * waiting. Both are things the reader can act on, so they are passed on rather than
+ * replaced with a generic failure.
+ */
+function readRequestFailure(error: unknown): string {
+  const status = (error as { status?: number } | null)?.status;
+  const detail = (error as { error?: { detail?: string } } | null)?.error?.detail;
+
+  if (status === 409 && typeof detail === 'string') {
+    return detail;
+  }
+  if (status === 429) {
+    return 'Too many attempts. Please wait a moment and try again.';
+  }
+  if (status === 422) {
+    return 'That email address is not one this workspace accepts.';
+  }
+  if (status === 0) {
+    return 'Could not reach the server. Please check your connection and try again.';
+  }
+
+  return 'Your request could not be sent. Please try again.';
 }

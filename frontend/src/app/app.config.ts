@@ -1,9 +1,10 @@
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
 import { ApplicationConfig, provideBrowserGlobalErrorListeners } from '@angular/core';
 import { provideClientHydration } from '@angular/platform-browser';
 import { provideRouter, withComponentInputBinding, withInMemoryScrolling } from '@angular/router';
-import { provideHttpClient } from '@angular/common/http';
 
 import { routes } from './app.routes';
+import { authInterceptor } from './core/interceptors/auth.interceptor';
 
 export const appConfig: ApplicationConfig = {
   providers: [
@@ -18,7 +19,11 @@ export const appConfig: ApplicationConfig = {
     // server: the conversation belongs to a browser session, and a server render
     // would pay the round trip on every request to paint what the client is about
     // to fetch anyway.
-    provideHttpClient(),
+    //
+    // The interceptor is registered here rather than inside `ApiService` because it
+    // has to see every request, including any made by a service added later by
+    // somebody who has not thought about auth at all.
+    provideHttpClient(withInterceptors([authInterceptor])),
     provideClientHydration(),
   ],
 };

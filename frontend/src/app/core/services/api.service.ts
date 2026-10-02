@@ -15,6 +15,7 @@ import {
 } from '../models/api.model';
 import { Conversation, ConversationThread } from '../models/conversation.model';
 import { Message, SourceReference, countDocuments } from '../models/message.model';
+import { AuthService, CSRF_HEADER } from './auth.service';
 
 /** An error from the backend, already reduced to something a view can show. */
 export class ApiError extends Error {
@@ -55,6 +56,17 @@ export class ApiService {
   private readonly http = inject(HttpClient);
 
   /**
+   * The session lives in cookies, so every call has to be allowed to carry them.
+   *
+   * A cross-origin request without `withCredentials` silently drops both the
+   * cookies it should send and the ones the server is trying to set, which is what
+   * makes authentication look wired up and behave as though it were not.
+   */
+  private readonly credentials = { withCredentials: true } as const;
+
+  private readonly auth = inject(AuthService);
+
+  /**
    * `POST /api/conversations`. Opens a conversation for this client.
    *
    * Only ever called for a conversation the user asked to start. A message posted
@@ -63,6 +75,19 @@ export class ApiService {
    */
   createConversation(clientId: string): Observable<ConversationCreateResponse> {
     return this.post<ConversationCreateResponse>('/api/conversations', { client_id: clientId });
+  }
+
+  /**
+   * `GET /documents`. The titles in the indexed corpus.
+   *
+   * The only read the admin area has of what is actually indexed. It is a bare list
+   * of names rather than a document record — no sizes, no status, no uploader — so
+   * it can answer "how much is in there" and nothing finer. Anything wanting more
+   * than that needs a backend endpoint of its own rather than a richer reading of
+   * this one.
+   */
+  getIndexedDocuments(): Observable<string[]> {
+    return this.get<string[]>('/documents');
   }
 
   /** `GET /api/conversations`. Every conversation this client owns, newest first. */
@@ -137,7 +162,9 @@ export class ApiService {
       `/api/conversations/${encodeURIComponent(conversationId)}` +
       `?client_id=${encodeURIComponent(clientId)}`;
 
-    return this.send(this.http.delete<void>(`${API_BASE_URL}${path}`)).pipe(map(() => undefined));
+    return this.send(this.http.delete<void>(`${API_BASE_URL}${path}`, this.credentials)).pipe(
+      map(() => undefined),
+    );
   }
 
   /**
@@ -147,29 +174,32 @@ export class ApiService {
    * Events are separated by a blank line and may arrive split across network
    * chunks, so the buffer is only drained on a complete frame and whatever follows
    * the last newline is kept for the next read.
+   *
+   * Raw `fetch` rather than `HttpClient`, because `HttpClient` reads a response to
+   * completion before handing it over and a stream has to be read as it arrives.
+   * That means this call gets none of the interceptor's work for free and has to do
+   * two of its jobs itself: send the session cookies, and send the CSRF header. A
+   * request made this way without them is refused by the server, which is the correct
+   * outcome rather than a papering-over.
    */
   private async readStream(
     conversationId: string,
     body: MessageSendRequest,
-    signal: AbortSignal,
+    abort: AbortSignal,
     onEvent: (event: ChatStreamEventDto) => void,
   ): Promise<void> {
-    let response: Response;
+    let response = await this.postStream(conversationId, body, abort);
 
-    try {
-      response = await fetch(
-        `${API_BASE_URL}/api/conversations/${encodeURIComponent(conversationId)}/messages`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal,
-        },
-      );
-    } catch {
-      // fetch reports a dropped connection and a refused request the same way,
-      // which is the status-0 case the rest of this service already describes.
-      throw new HttpErrorResponse({ status: 0, error: null });
+    // The access token may have run out between page load and the first question.
+    // The interceptor does this for every `HttpClient` request; this one has to ask
+    // for itself, and only once, since a second refresh would arrive after the first
+    // had already rotated the token.
+    if (response.status === 401 && this.auth.isAuthenticated()) {
+      const user = await this.auth.refresh();
+
+      if (user) {
+        response = await this.postStream(conversationId, body, abort);
+      }
     }
 
     if (!response.ok) {
@@ -207,6 +237,34 @@ export class ApiService {
         buffer = buffer.slice(boundary + 2);
         boundary = buffer.indexOf('\n\n');
       }
+    }
+  }
+
+  /** One attempt at the streamed answer, with the cookies and the CSRF header on it. */
+  private async postStream(
+    conversationId: string,
+    body: MessageSendRequest,
+    abort: AbortSignal,
+  ): Promise<Response> {
+    try {
+      return await fetch(
+        `${API_BASE_URL}/api/conversations/${encodeURIComponent(conversationId)}/messages`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            [CSRF_HEADER]: this.auth.readCsrfToken() ?? '',
+          },
+          // What `withCredentials` does for `HttpClient`, done by hand here.
+          credentials: 'include',
+          body: JSON.stringify(body),
+          signal: abort,
+        },
+      );
+    } catch {
+      // fetch reports a dropped connection and a refused request the same way,
+      // which is the status-0 case the rest of this service already describes.
+      throw new HttpErrorResponse({ status: 0, error: null });
     }
   }
 
@@ -254,17 +312,17 @@ export class ApiService {
    * which is a request that cannot fail loudly.
    */
   private get<T>(path: string): Observable<T> {
-    return this.send(this.http.get<T>(`${API_BASE_URL}${path}`));
+    return this.send(this.http.get<T>(`${API_BASE_URL}${path}`, this.credentials));
   }
 
   /** A POST against a path, with the timeout and the error mapping applied. */
   private post<T>(path: string, body: unknown): Observable<T> {
-    return this.send(this.http.post<T>(`${API_BASE_URL}${path}`, body));
+    return this.send(this.http.post<T>(`${API_BASE_URL}${path}`, body, this.credentials));
   }
 
   /** A PATCH against a path, with the timeout and the error mapping applied. */
   private patch<T>(path: string, body: unknown): Observable<T> {
-    return this.send(this.http.patch<T>(`${API_BASE_URL}${path}`, body));
+    return this.send(this.http.patch<T>(`${API_BASE_URL}${path}`, body, this.credentials));
   }
 
   /** Applies the request timeout and flattens transport failures into `ApiError`. */

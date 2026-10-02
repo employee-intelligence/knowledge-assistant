@@ -1,6 +1,16 @@
 import { DestroyRef, Injectable, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { Observable, EMPTY, catchError, finalize, map, mergeMap, of, reduce, switchMap, throwError } from 'rxjs';
+import {
+  Observable,
+  catchError,
+  finalize,
+  map,
+  mergeMap,
+  of,
+  reduce,
+  switchMap,
+  throwError,
+} from 'rxjs';
 
 import { SourceDto } from '../models/api.model';
 import { UNTITLED_CONVERSATION } from '../models/conversation.model';
@@ -95,7 +105,13 @@ export class ChatService {
   );
 
   /**
-   * Asks a question in the open conversation.
+   * Asks a question, in the open conversation or in a new one.
+   *
+   * This is the only place a conversation is created, and it is created here because
+   * this is the first moment there is something to put in one. Opening the app, or
+   * pressing "New conversation", leaves no conversation on the server and none in the
+   * sidebar: both of those only empty the thread, and the id is taken when a question
+   * is actually sent.
    *
    * Both halves of the exchange are recorded before the request goes out, so the
    * thread shows the question and its pending answer straight away rather than
@@ -116,16 +132,23 @@ export class ChatService {
     this.conversations
       .ready()
       .pipe(
+        // Read after waiting: the open conversation is decided by the list that
+        // was just fetched, and reading it before the wait would be reading the
+        // state this question is waiting for.
         switchMap(() => {
-          // Read after waiting: the open conversation is decided by the list that
-          // was just fetched, and reading it before the wait would be reading the
-          // state this question is waiting for.
-          const conversationId = this.conversations.activeId();
+          const open = this.conversations.activeId();
 
-          if (conversationId === null) {
-            return EMPTY;
+          if (open !== null) {
+            return of(open);
           }
 
+          // No conversation is open — a first visit, or "New conversation" — so this
+          // question starts one. The create is shared, so a second question sent
+          // before the first answer lands joins this conversation rather than opening
+          // another alongside it.
+          return this.conversations.createConversation().pipe(map((created) => created.id));
+        }),
+        switchMap((conversationId) => {
           const exchange = this.conversations.appendExchange(trimmed);
 
           return this.dispatch(conversationId, exchange.assistantId, trimmed);
@@ -168,13 +191,15 @@ export class ChatService {
   /**
    * Starts a new conversation.
    *
-   * A real one, created on the backend, rather than the view being pointed back at
-   * the start of the current thread: the thread it left behind stays in the
-   * sidebar, which is the whole point of conversations outliving the question that
-   * started them.
+   * Unsaved, and deliberately so. This empties the thread and points the composer at
+   * nothing; it does not create anything, because a conversation nobody has said
+   * anything in is not one. The conversation this leaves behind stays in the sidebar
+   * — which is the whole point of conversations outliving the question that started
+   * them — and the next question asked opens a new one, which is created at that
+   * moment and appears in the list once there is something in it.
    */
   startNewConversation(): void {
-    this.conversations.createConversation().pipe(takeUntilDestroyed(this.destroyRef)).subscribe();
+    this.conversations.startUnsaved();
   }
 
   /** Opens an existing conversation, loading its thread. */

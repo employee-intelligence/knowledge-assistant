@@ -14,6 +14,25 @@ services:
     dockerContext: ./backend
 
     envVars:
+      # `production` is what forces `Secure` on the session cookies and refuses to
+      # seed an administrator from `AUTH_SEED_ADMIN_*`. Nothing else in the
+      # blueprint sets it, so without this the service would run with development
+      # cookie flags in production.
+      - key: ENVIRONMENT
+        value: "production"
+
+      # Signs the session and CSRF tokens. Set in the Render dashboard; a random
+      # value of at least 32 characters. Rotating it signs everybody out.
+      - key: AUTH_SECRET_KEY
+        sync: false
+
+      # The one-time key that admits the first administrator through
+      # `POST /api/auth/bootstrap-admin`. Set in the dashboard, and removed once a
+      # real administrator exists — from then on the route answers 409 whatever the
+      # key is.
+      - key: AUTH_BOOTSTRAP_KEY
+        sync: false
+
       # Generation key, set in the Render dashboard. An absent or revoked key does
       # not stop the service booting, it only makes /chat fail, so /health
       # reports it.

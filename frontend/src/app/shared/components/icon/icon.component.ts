@@ -39,6 +39,7 @@ export type IconName =
   | 'trash-2'
   | 'upload'
   | 'user'
+  | 'user-plus'
   | 'users'
   | 'x';
 
@@ -50,9 +51,13 @@ export type IconName =
 const OPTICAL_STROKE = 48;
 
 /**
- * Renders one stroked icon at a pixel size. Purely presentational: it takes a
- * name and a size and knows nothing about the domain.
- */
+   * Renders one stroked icon at a pixel size. Purely presentational: it takes a
+   * name and a size and knows nothing about the domain.
+   *
+   * The set is closed so a typo fails the build rather than rendering an empty
+   * `<svg>`: an icon that silently draws nothing looks like a layout mistake, and
+   * costs a screenshot to find.
+   */
 @Component({
   selector: 'app-icon',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -303,6 +308,13 @@ const OPTICAL_STROKE = 48;
           <g>
             <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
             <circle cx="12" cy="7" r="4" />
+          </g>
+        }
+        @case ('user-plus') {
+          <g>
+            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+            <circle cx="9" cy="7" r="4" />
+            <path d="M19 8v6M22 11h-6" />
           </g>
         }
         @case ('users') {

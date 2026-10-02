@@ -200,6 +200,30 @@ describe('ResponseViewComponent', () => {
       expect(element().querySelector('app-chat-thread')).toBeNull();
     });
 
+    it('shapes the placeholder like the conversation it stands in for', () => {
+      // A skeleton is only worth having if it is the shape of what replaces it. The
+      // question bubble and the answer card are both measured here against the real
+      // components, because a placeholder with the wrong corner or a bar the real card
+      // does not have makes the page visibly correct itself on arrival.
+      const bubble = element().querySelector('.rounded-br-sm');
+      const answer = element().querySelector('app-answer-pending .rounded-tl-sm');
+
+      expect(bubble).not.toBeNull();
+      expect(answer).not.toBeNull();
+      // The real answer card has no heading bar above its prose, and the placeholder
+      // must not invent one or the citations jump when the answer lands.
+      expect(element().querySelectorAll('app-answer-pending app-skeleton').length).toBeGreaterThan(4);
+    });
+
+    it('hides the placeholder from assistive technology, saying it once instead', () => {
+      // A screen reader announcing a stack of empty boxes, and then a live region
+      // saying it again, is twice the interruption for one piece of information.
+      const placeholder = element().querySelector('[aria-hidden="true"]');
+
+      expect(placeholder).not.toBeNull();
+      expect(element().querySelectorAll('[role="status"]')).toHaveLength(1);
+    });
+
     it('does not report a conversation as missing while it is still loading', async () => {
       missing.set(true);
       await refresh();

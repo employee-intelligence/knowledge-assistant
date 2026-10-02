@@ -1,7 +1,11 @@
 # Frontend Architecture and Coding Conventions
 ### Internal Knowledge Assistant — Angular v22
 
-**Phase 1 scope note:** Authentication and the Admin panel are **not** part of this phase. They are documented at the end of this file under Phase 2, where the screens are built but deliberately unwired. Nothing in Phase 1 depends on them. Phase 1 covers three views only: the Dashboard (ask a question), the Response view (see the answer), and the History view (past questions).
+**Phase 2 note:** Authentication and the Admin panel are described at the end of this
+file under Phase 2. They are now built and wired to a backend: `Phase_2_Authentication.md`
+in the repository root is the design, and the section below records what the frontend
+half of it became. Phase 1 itself is unchanged — the Dashboard, the Response view and
+the conversation list — except that every route is now behind a session.
 
 ---
 
@@ -160,25 +164,111 @@ A view exists only to assemble the components its route needs and connect them t
 
 ---
 
-## Phase 2: Authentication and Admin (screens built, not wired)
+## Phase 2: Authentication and Admin
 
-The screens exist and are reviewable. What is deliberately missing is the part that needs a decision about accounts, a session and a server that enforces anything.
+Authentication is built and wired to the FastAPI backend described in
+`../Phase_2_Authentication.md`. Accounts are invite-only: an administrator creates a
+pending user and sends a link, the recipient sets a password, and from then on the
+session is a pair of `httpOnly` cookies this app cannot read.
 
-**Built, as UI only:**
+**Auth, as it is now:**
 
-- **Auth:** `login-view`, `register-view` and `accept-invite-view` under `features/auth/views/`, sharing `auth-layout` in `features/auth/components/`. None of them authenticates: they collect input and then state that accounts are not connected, so nobody types a real password into a drawing. Login's "Remember me" keeps the work email in `localStorage` and nothing else — there is no session to keep alive yet, and storing a password to save a few keystrokes is the wrong trade even once there is one. The registration screen is built as drawn, which puts a self-service form next to a footer reading "SSO enabled"; if the workspace does enforce single sign-on, that form is not how anybody joins and the two panels contradict each other. Worth settling before the auth service is written.
+- **`login-view`** posts to `POST /api/auth/login` through `AuthService`. Reactive
+  forms, with the validators kept as a UX layer: the server runs the same checks and
+  is what decides. "Remember me" still keeps only the work email in `localStorage` —
+  the session is a cookie the browser holds and this code cannot see, and storing a
+  password to save a few keystrokes is the wrong trade either way.
+- **`accept-invite-view`** reads `?token=` on load, asks `GET /api/auth/invite/{token}`
+  what the invitation is for so the name and address fill themselves in, and posts
+  the token and the password to `POST /api/auth/accept-invite`. The submission carries
+  no name and no address: the account comes from the token server-side, and sending a
+  second claim about who this is would be a way to disagree with it. Accepting signs
+  the person in, so it lands in the app rather than back at the sign-in screen.
+- **`register-view` is gone**, and `/register` redirects to `/accept-invite`. There is
+  no self-registration behind it, so leaving a live "Create your account" form there
+  was a form that could not succeed.
+- **`AuthService`** holds the session as signals: `user`, `status`
+  (`unknown` / `authenticated` / `anonymous`), `isAuthenticated`, `isAdmin`. `unknown`
+  is the honest answer between page load and the first `GET /api/auth/me` returning,
+  and it exists so a guard can wait rather than guess.
+- **`core/guards/auth.guard.ts`** holds three guards: `authGuard`, `adminGuard` and
+  `guestGuard`. They are a convenience and not the boundary — the backend refuses the
+  same routes with a 401 or a 403, so a guard that was bypassed entirely would still
+  not let anybody through.
+- **`core/interceptors/auth.interceptor.ts`** attaches the CSRF header on
+  state-changing requests, and on a 401 asks for one refresh and replays the request.
+  Concurrent 401s share that refresh, because a second one would arrive after the
+  first had already rotated the token and the server would read it as a replayed
+  token and revoke the whole session.
+- **`auth-layout`** no longer says that nothing typed on a signed-out screen is sent
+  anywhere. It was true while the screens discarded their input and stopped being true
+  the moment the form was wired to the backend.
 - **Admin:** `admin-dashboard-view`, `admin-documents-view` and `admin-question-logs-view` under `views/`, with components under `features/admin/components/`. The three are now reached through one tab bar rather than two competing sets of link cards. The dashboard reports how recent questions ended and separates documents still indexing from ones that failed. Deleting and renaming act on a placeholder list in `core/data/mock-admin.data.ts` and say they did.
 - **Uploads:** `document-dropzone` is a real drop target that also browses. It reads the file's own name and size and refuses an extension the design does not accept, all in the browser, so none of that needs a server. The progress bar is the exception and is marked as theatre in the code: nothing is transmitted, so it advances on a timer and the parent owns the message. A picked file enters the list as `processing`, since that is the state an upload passes through, and `PolicyDocument` keeps `uploadedAt` separately from `updatedAt` because when a file arrived and when it was last touched are different questions.
 - **Question log review:** rows open `question-log-detail`, a right-hand drawer carrying the whole question, the answer as it was given, and the passages retrieval considered. `QuestionLog` therefore keeps `answer` and `sources` rather than a source count, because a log is only reviewable with them: a `not-found` entry holds the near-misses that missed the threshold, and a `failed` entry has no answer at all. Citations reuse `features/response/components/source-tag`, so a log and an answer show evidence identically. Marking a log reviewed and re-asking a question are stated as unconnected rather than offered as buttons that do nothing.
-- **Roles:** `ViewerService` holds the viewer. The role is a signal, not a guard, and the sidebar switch previews both. An employee reaching an admin URL gets `admin-access-required` rather than an empty screen.
+- **Roles:** `ViewerService` is gone. The role comes from the backend and lives in `AuthService` as a signal; `role-preview-toggle` went with it, because a role the server does not grant is not a role to preview. The sidebar link and the three admin views read `auth.isAdmin()`. An employee reaching an admin URL is redirected by `adminGuard`, and the `admin-access-required` panel remains as the second line of defence for a route reached while the app is already on screen.
 - **Reusable pieces added for this work:** `app-badge`, `app-form-field`, `app-empty-state` and `app-confirm-dialog` under `shared/components/`. The dialog is a native `<dialog>`, so its focus trap and Escape handling come from the browser. `shared/utils/file-size.util.ts` formats a file size once for both the upload panel and the inventory row.
 
-**Mock identity:** `MOCK_VIEWER` is Ama Konadu, matching the designs, and the administrator role is labelled "HR Administrator". Initials are stored per log entry rather than derived from the name, which is how a rename once left stale initials in place.
+**The administrator role** is labelled "HR Administrator" on screen and is `admin` on
+the wire. Initials are still stored per log entry rather than derived from the name,
+which is how a rename once left stale initials in place.
 
-**Still to build when accounts are decided:**
+**Getting an account.** Two ways in, and neither is a registration form:
 
-- `auth.service.ts` and `auth.guard.ts` under `core/`, and an `auth.interceptor.ts` for attaching session state to requests.
-- `document.service.ts` and a `question-log.service.ts`, replacing `mock-admin.data.ts`.
-- `admin.guard.ts`, replacing the `viewer.isAdministrator()` branches. The role checks are already in the two places a guard would need to cover: the sidebar link and the three admin views.
+- **`register-view`** is a *request* for access: a name and a work email, and nothing
+  else. No password field, because there is nothing to set one with yet — an
+  administrator reads the queue at `/admin/access` and approving it provisions the
+  account and produces the invitation link. The request model on the backend has no
+  `role` field, so a requester cannot name one; the role is set by whoever approves.
+  A self-service form would let anyone who could type a colleague's address claim it,
+  since a domain check only proves they typed it.
+- **`admin-invite-view`** at `/admin/invite` is the other end: an administrator
+  generates an invitation link for somebody directly.
+
+  There is no mail service, so **the link is the deliverable**. Both admin screens
+  show it with a Copy button and an "Open it" link for checking before sending, and
+  say that it works once and expires. The administrator sends it by whatever means
+  the company already uses. That is worse than an email and deliberately not a hidden
+  one: nothing is queued and nothing silently dropped.
+
+**Three things about auth in this codebase that are easy to get wrong**, each of
+which cost a bug during this phase and each of which has a test:
+
+- **`inject()` before any `await`.** A guard that resolves `AuthService` after a pause
+  has already left the injection context and gets `NG0203`.
+- **Nothing can be checked during a server render.** There are no cookies on a
+  server, so both guards defer to the client. A render produces the shell and no data,
+  and the guards run again with a real answer the moment the client takes over. This
+  is also why `adminGuard` must not evaluate the role server-side: there is no user
+  there, so it would read "not an administrator" for everybody and redirect every
+  admin deep link to the dashboard.
+- **`SameSite` is decided by host, not by port.** A page at `127.0.0.1:4200` calling
+  `localhost:8099` is cross-site, and the browser withholds the session cookies:
+  sign-in appears to work and every later request is a 401. `API_BASE_URL` and the
+  host serving the app have to agree exactly. This is written up at the top of
+  `core/api.config.ts` because it is the most likely way a deployment like this
+  breaks silently.
+- **`CSRF_TRUSTED_ORIGINS` has the same trap, and fails as a 403 rather than an
+  error.** `localhost:4200` and `127.0.0.1:4200` are different origins to a browser,
+  so an allow-list naming one rejects requests from the other — and the symptom is
+  every state-changing request being refused, which reads as a broken interceptor
+  rather than a misconfigured list.
+
+**Still to build:**
+
+- `document.service.ts` and a `question-log.service.ts`, replacing
+  `mock-admin.data.ts`. The admin screens still act on a placeholder list; the
+  document and question-log endpoints they need are not in the backend yet, and
+  `require_admin` is written and tested so adding them is a one-line change per route.
+
+**Where accounts are seeded.** `AUTH_SEED_ADMIN_EMAIL` / `AUTH_SEED_ADMIN_PASSWORD` in
+`backend/.env` create an administrator at startup, which is how a fresh checkout
+becomes usable without a shell. It is refused when `ENVIRONMENT=production`, the
+password goes through the same policy as any other, and the two lines should be
+removed once a real administrator exists.
+- The streamed answer uses raw `fetch` rather than `HttpClient`, because `HttpClient`
+  reads a response to completion and a stream has to be read as it arrives. It sets
+  `credentials: 'include'` and the CSRF header itself, and handles its own one-time
+  refresh on a 401 — the one request the interceptor does not see.
 - The shell's plain-layout list in `app.component.ts` should become route data, once there are enough signed-out routes to justify it.
 

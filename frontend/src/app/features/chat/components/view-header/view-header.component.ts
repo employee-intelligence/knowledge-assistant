@@ -25,6 +25,12 @@ import { IconComponent } from '../../../../shared/components/icon/icon.component
  * both icons drew at once. A wrapper with no display utility of its own is
  * hidden reliably.
  *
+ * It carries a minimum height because above `lg` the toggle leaves the flow: on
+ * a screen with no title — the assistant's own landing page — nothing is left
+ * to give the strip any, so it collapsed to its padding while every titled
+ * screen kept the height a title needs. The bar is the one thing that does not
+ * move between screens, and it should not.
+ *
  * It owns no state of its own; the toggle delegates to `LayoutService`.
  */
 @Component({
@@ -33,7 +39,8 @@ import { IconComponent } from '../../../../shared/components/icon/icon.component
   imports: [ButtonComponent, IconComponent],
   host: {
     class:
-      'relative flex shrink-0 items-center justify-between gap-3 border-b border-border bg-card px-4 py-4 sm:px-6 lg:justify-center lg:py-4 lg:px-8',
+      'relative flex min-h-header shrink-0 items-center justify-between gap-3 border-b ' +
+      'border-border bg-card px-4 py-4 sm:px-6 lg:justify-center lg:py-4 lg:px-8',
   },
   template: `
     <span class="truncate font-headings text-base font-semibold text-foreground lg:hidden">

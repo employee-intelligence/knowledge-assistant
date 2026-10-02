@@ -1,15 +1,8 @@
-import {
-  ChangeDetectionStrategy,
-  Component,
-  computed,
-  inject,
-  signal,
-  viewChild,
-} from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 
 import { MOCK_DOCUMENTS } from '../../core/data/mock-admin.data';
 import type { PolicyDocument } from '../../core/models/document.model';
-import { ViewerService } from '../../core/services/viewer.service';
+import { AuthService } from '../../core/services/auth.service';
 import { AdminAccessRequiredComponent } from '../../features/admin/components/admin-access-required/admin-access-required.component';
 import { DocumentDropzoneComponent } from '../../features/admin/components/document-dropzone/document-dropzone.component';
 import { DocumentTableComponent } from '../../features/admin/components/document-table/document-table.component';
@@ -19,6 +12,7 @@ import { ConfirmDialogComponent } from '../../shared/components/confirm-dialog/c
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { IconComponent } from '../../shared/components/icon/icon.component';
 import { InputComponent } from '../../shared/components/input/input.component';
+import { ModalComponent } from '../../shared/components/modal/modal.component';
 import { formatFileSize } from '../../shared/utils/file-size.util';
 
 /**
@@ -38,25 +32,40 @@ import { formatFileSize } from '../../shared/utils/file-size.util';
     EmptyStateComponent,
     IconComponent,
     InputComponent,
+    ModalComponent,
     ViewHeaderComponent,
   ],
   host: { class: 'flex min-h-0 flex-1 flex-col' },
   template: `
     <app-view-header title="Documents" />
 
-    @if (viewer.isAdministrator()) {
+    @if (auth.isAdmin()) {
+      <!--
+        No max-width, for the same reason the dashboard has none: the header strip
+        above spans the full content area, and a centred column under it leaves the
+        title and the table it is about at two different widths.
+      -->
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
-        <div class="mx-auto w-full max-w-4xl">
-          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div class="w-full sm:max-w-xs">
-              <app-input
-                [value]="search()"
-                (valueChange)="search.set($event)"
-                placeholder="Search documents"
-                ariaLabel="Search documents"
-              />
-            </div>
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div class="w-full sm:max-w-xs">
+            <app-input
+              [value]="search()"
+              (valueChange)="search.set($event)"
+              placeholder="Search documents"
+              ariaLabel="Search documents"
+            />
           </div>
+
+          <button
+            app-button
+            type="button"
+            class="shrink-0"
+            (click)="isUploadOpen.set(true)"
+          >
+            <app-icon name="upload" [size]="16" />
+            <span>Upload document</span>
+          </button>
+        </div>
 
           @if (notice()) {
             <p
@@ -68,39 +77,53 @@ import { formatFileSize } from '../../shared/utils/file-size.util';
             </p>
           }
 
-          @if (visibleDocuments().length > 0) {
-            <div class="mt-5">
-              <app-document-dropzone (fileAccepted)="addDocument($event)" />
-            </div>
+        @if (visibleDocuments().length > 0) {
+          <p class="mt-5 text-xs text-muted-foreground">{{ summary() }}</p>
 
-            <p class="mt-5 text-xs text-muted-foreground">{{ summary() }}</p>
-
-            <div class="mt-2">
-              <app-document-table
-                [documents]="visibleDocuments()"
-                (deleteRequested)="askToDelete($event)"
-                (retryRequested)="retry($event)"
-                (renamed)="applyRename($event)"
-              />
-            </div>
-          } @else {
-            <div class="mt-5 rounded-lg border border-border bg-card py-6">
-              <app-empty-state icon="file-plus" [title]="emptyTitle()" [message]="emptyMessage()">
-                @if (search() === '') {
-                  <button app-button type="button" (click)="dropzone()?.browse()">
-                    <app-icon name="upload" [size]="16" />
-                    <span>Upload a document</span>
-                  </button>
-                } @else {
-                  <button app-button type="button" variant="outline" (click)="search.set('')">
-                    Clear search
-                  </button>
-                }
-              </app-empty-state>
-            </div>
-          }
-        </div>
+          <div class="mt-2">
+            <app-document-table
+              [documents]="visibleDocuments()"
+              (deleteRequested)="askToDelete($event)"
+              (retryRequested)="retry($event)"
+              (renamed)="applyRename($event)"
+            />
+          </div>
+        } @else {
+          <div class="mt-5 rounded-lg border border-border bg-card py-6">
+            <app-empty-state icon="file-plus" [title]="emptyTitle()" [message]="emptyMessage()">
+              @if (search() === '') {
+                <button app-button type="button" (click)="isUploadOpen.set(true)">
+                  <app-icon name="upload" [size]="16" />
+                  <span>Upload a document</span>
+                </button>
+              } @else {
+                <button app-button type="button" variant="outline" (click)="search.set('')">
+                  Clear search
+                </button>
+              }
+            </app-empty-state>
+          </div>
+        }
       </div>
+
+      <!--
+        Uploading is a modal rather than a panel on the page.
+
+        It is a short task with one outcome, and the person who came here to look at
+        the inventory did not come to be interrupted by a drop target taking up the
+        top third of it. The panel is also the only part of this screen that is not
+        about what is already uploaded, so it is the one thing here that does not
+        belong beside the table permanently.
+      -->
+      <app-modal
+        title="Upload a document"
+        message="The assistant answers from what it can read. PDF, DOCX and TXT are supported."
+        icon="upload"
+        [isOpen]="isUploadOpen()"
+        (closed)="isUploadOpen.set(false)"
+      >
+        <app-document-dropzone (fileAccepted)="addDocument($event)" />
+      </app-modal>
 
       <app-confirm-dialog
         [isOpen]="isDeleteOpen()"
@@ -117,14 +140,14 @@ import { formatFileSize } from '../../shared/utils/file-size.util';
   `,
 })
 export class AdminDocumentsViewComponent {
-  /** The viewer, which decides whether this area is open at all. */
-  protected readonly viewer = inject(ViewerService);
+  /** Who is signed in, which decides whether this area is open at all. */
+  protected readonly auth = inject(AuthService);
 
   /** The placeholder inventory, copied so deletes only affect this screen. */
   private readonly documentsState = signal<PolicyDocument[]>([...MOCK_DOCUMENTS]);
 
-  /** The upload panel, so the empty state can open its file picker. */
-  private readonly dropzone = viewChild(DocumentDropzoneComponent);
+  /** Whether the upload panel is open. */
+  protected readonly isUploadOpen = signal(false);
 
   /** Current search term. */
   protected readonly search = signal('');
@@ -235,6 +258,7 @@ export class AdminDocumentsViewComponent {
   protected addDocument(file: File): void {
     const now = new Date().toISOString();
 
+
     this.documentsState.update((documents) => [
       {
         id: `doc-upload-${documents.length + 1}`,
@@ -245,13 +269,17 @@ export class AdminDocumentsViewComponent {
         sectionCount: 0,
         uploadedAt: now,
         updatedAt: now,
-        updatedBy: this.viewer.viewer().name,
+        updatedBy: this.auth.user()?.name ?? '',
       },
       ...documents,
     ]);
     this.notice.set(
       `${file.name} was added to the preview list only: uploads are not connected to a server, so nothing was transmitted.`,
     );
+
+    // Closed on the way out: the row is on the page behind it, and leaving a modal
+    // open over the thing it just changed hides the result of the action.
+    this.isUploadOpen.set(false);
   }
 
   /**
