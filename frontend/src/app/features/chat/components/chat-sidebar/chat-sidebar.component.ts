@@ -52,7 +52,7 @@ import { BrandLogoComponent } from '../brand-logo/brand-logo.component';
           variant="ghost"
           tone="dark"
           size="rail"
-          aria-label="Search conversations"
+          aria-label="Search questions"
           (click)="layout.openSidebar()"
         >
           <app-icon name="search" [size]="18" />
@@ -63,8 +63,8 @@ import { BrandLogoComponent } from '../brand-logo/brand-logo.component';
             <app-history-item
               appearance="rail"
               [entry]="entry"
-              [isSelected]="entry.question.id === activeSessionId()"
-              (selected)="openSession($event)"
+              [isSelected]="entry.question.id === activeTurnId()"
+              (selected)="openTurn($event)"
             />
           }
         </div>
@@ -95,15 +95,15 @@ import { BrandLogoComponent } from '../brand-logo/brand-logo.component';
           <app-input
             [value]="history.searchTerm()"
             (valueChange)="history.setSearchTerm($event)"
-            placeholder="Search conversations"
-            ariaLabel="Search conversations"
+            placeholder="Search questions"
+            ariaLabel="Search questions"
           />
         </div>
       </div>
 
       <nav
         class="scrollbar-thin mt-4 min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2"
-        aria-label="Recent conversations"
+        aria-label="Questions in this session"
       >
         <div class="flex flex-col gap-1 pb-2">
           @for (group of history.groups(); track group.bucket) {
@@ -114,8 +114,8 @@ import { BrandLogoComponent } from '../brand-logo/brand-logo.component';
               <app-history-item
                 appearance="sidebar"
                 [entry]="entry"
-                [isSelected]="entry.question.id === activeSessionId()"
-                (selected)="openSession($event)"
+                [isSelected]="entry.question.id === activeTurnId()"
+                (selected)="openTurn($event)"
               />
             }
           } @empty {
@@ -154,14 +154,14 @@ export class ChatSidebarComponent {
   private readonly chat = inject(ChatService);
   private readonly router = inject(Router);
 
-  /** Id of the open conversation, used to mark the active row. */
-  protected readonly activeSessionId = computed(() => this.chat.question()?.id ?? null);
+  /** Id of the open turn, used to mark the active row. */
+  protected readonly activeTurnId = computed(() => this.chat.activeTurnId());
 
   /** Explains an empty list, distinguishing "no history" from "no matches". */
   protected readonly emptyMessage = computed(() =>
     this.history.hasNoResults()
-      ? 'No conversations match your search.'
-      : 'No conversations yet. Ask a question to get started.',
+      ? 'No questions match your search.'
+      : 'No questions yet. Ask one to get started.',
   );
 
   /** Starts a fresh conversation and returns to the dashboard. */
@@ -171,9 +171,9 @@ export class ChatSidebarComponent {
     void this.router.navigate(['/']);
   }
 
-  /** Opens the stored conversation for a history row. */
-  protected openSession(questionId: string): void {
+  /** Opens the turn a history row stands for. */
+  protected openTurn(turnId: string): void {
     this.layout.closeAfterNavigation();
-    void this.router.navigate(['/response', questionId]);
+    void this.router.navigate(['/response', turnId]);
   }
 }

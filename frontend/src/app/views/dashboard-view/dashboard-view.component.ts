@@ -2,9 +2,10 @@ import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { Router } from '@angular/router';
 
 import { ChatService } from '../../core/services/chat.service';
-import { SuggestionListComponent } from '../../features/ask/components/suggestion-list/suggestion-list.component';
 import { QuestionInputComponent } from '../../features/ask/components/question-input/question-input.component';
+import { SuggestionListComponent } from '../../features/ask/components/suggestion-list/suggestion-list.component';
 import { ViewHeaderComponent } from '../../features/chat/components/view-header/view-header.component';
+import { STARTER_QUESTIONS } from '../../shared/utils/constants';
 
 /**
  * The landing view: a centred prompt, the starter questions, and the composer.
@@ -27,7 +28,7 @@ import { ViewHeaderComponent } from '../../features/chat/components/view-header/
         </p>
 
         <div class="mt-6 w-full max-w-[520px]">
-          <app-suggestion-list [suggestions]="chat.suggestions()" (chosen)="onAsk($event)" />
+          <app-suggestion-list [suggestions]="starterQuestions" (chosen)="onAsk($event)" />
         </div>
 
         <div class="mt-8 w-full max-w-[640px]">
@@ -38,22 +39,24 @@ import { ViewHeaderComponent } from '../../features/chat/components/view-header/
   `,
 })
 export class DashboardViewComponent {
-  /** Current conversation state, including loading and the starter prompts. */
+  /** Current conversation state, including the loading flag for the composer. */
   protected readonly chat = inject(ChatService);
+
+  /** Starter prompts, which are product copy rather than data from the backend. */
+  protected readonly starterQuestions = STARTER_QUESTIONS;
 
   private readonly router = inject(Router);
 
   /**
-   * Asks a question, then routes to the response view. The service opens the
-   * conversation first so the thread is ready when the view mounts.
+   * Asks a question and routes to the response view.
+   *
+   * The route carries no id: `/response` follows the newest turn, so the question
+   * just sent is the one that opens. That also means the view does not have to
+   * wait for the request to start before it can navigate.
    */
   protected onAsk(question: string): void {
     this.chat.ask(question);
 
-    const id = this.chat.question()?.id;
-
-    if (id) {
-      void this.router.navigate(['/response', id]);
-    }
+    void this.router.navigate(['/response']);
   }
 }

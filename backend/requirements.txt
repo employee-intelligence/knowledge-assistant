@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 sqlalchemy
+psycopg[binary]
 psycopg2-binary
 llama-index-core
 llama-index-embeddings-openai

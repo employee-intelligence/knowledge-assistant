@@ -13,8 +13,11 @@ export const appConfig: ApplicationConfig = {
       withComponentInputBinding(),
       withInMemoryScrolling({ scrollPositionRestoration: 'enabled' }),
     ),
-    // Registered for the API integration phase. `ApiService` is the only place
-    // allowed to use it, and it currently serves mock data.
+    // `ApiService` is the only place allowed to use HttpClient, and it is the
+    // only thing that knows the backend's URLs. Nothing here fetches on the
+    // server: the conversation belongs to a browser session, and a server render
+    // would pay the round trip on every request to paint what the client is about
+    // to fetch anyway.
     provideHttpClient(),
     provideClientHydration(),
   ],
