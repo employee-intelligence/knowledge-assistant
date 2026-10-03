@@ -43,7 +43,7 @@ class Assistant:
     Flow: personal-question guard -> vector retrieval (top_k, filtered by
     min_score) -> single strict-context prompt -> sentinel post-processing
     (NOT_FOUND / PERSONAL mapped to canned responses).
-    """
+pick    """
 
     def __init__(self, index: VectorStoreIndex):
         # similarity_top_k = how many chunks we retrieve per question.
