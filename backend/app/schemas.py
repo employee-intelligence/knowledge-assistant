@@ -1,6 +1,9 @@
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, EmailStr
 
+# Request/response shapes for the REST API. FastAPI uses these for request
+# validation and OpenAPI (Swagger) schema generation automatically.
+
 
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=64)

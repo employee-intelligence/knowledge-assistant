@@ -5,6 +5,8 @@ from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, create
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from app.config import settings
 
+# sqlite (dev) needs check_same_thread disabled; Postgres (prod) does not.
+# pool_pre_ping recycles dropped connections before they cause 500s.
 _args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, connect_args=_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False)
@@ -15,6 +17,7 @@ class Base(DeclarativeBase):
 
 
 class User(Base):
+    # One row per registered employee; email is unique and indexed for login lookups.
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -28,6 +31,7 @@ class User(Base):
 
 
 class ChatSession(Base):
+    # A chat session pairs a user with a time-limited conversation window.
     __tablename__ = "sessions"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -39,6 +43,7 @@ class ChatSession(Base):
 
 
 class QA(Base):
+    # One row per answered/refused chat turn; sources stored as JSON for history display.
     __tablename__ = "history"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -70,10 +75,13 @@ def get_valid_session(db: Session, session_id: str) -> ChatSession | None:
     session = db.get(ChatSession, session_id)
     if session is None:
         return None
+    # Postgres returns timezone-naive datetimes even for DateTime(timezone=True)
+    # columns on some drivers — normalize before comparing.
     expires_at = session.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at < datetime.now(timezone.utc):
+        # Expired sessions are deleted lazily (on access) to keep the table clean.
         db.delete(session)
         db.commit()
         return None
@@ -89,4 +97,5 @@ def get_db():
 
 
 def init_db() -> None:
+    # Creates all tables on startup if they don't exist yet (idempotent).
     Base.metadata.create_all(engine)

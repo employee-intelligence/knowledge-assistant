@@ -1,10 +1,21 @@
-import logging
+import json
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+# Knowledge Assistant API — FastAPI entrypoint.
+#
+# High-level flow per request:
+#   POST /auth/login        -> JWT
+#   POST /sessions          -> chat session id
+#   POST /chat              -> SSE stream: "sources" event, then "token" events, then "done"
+#   GET  /history/{sid}     -> persisted Q&A rows
+#
+# The llama-index VectorStoreIndex is built once at startup (see lifespan) and
+# shared read-only across requests; all conversation state lives in Postgres.
+
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,7 +26,6 @@ from app.rag.engine import Assistant
 from app.rag.ingest import build_index
 from app.schemas import (
     ChatRequest,
-    ChatResponse,
     HistoryItem,
     SessionCreateResponse,
     TokenResponse,
@@ -24,20 +34,17 @@ from app.schemas import (
     UserResponse,
 )
 
-logger = logging.getLogger(__name__)
-
+# Shared per-process state (see lifespan). Not persisted — Postgres is the source of truth.
 state: dict = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not settings.has_google_api_key:
-        # Not fatal: the guard and retrieval-only paths still work, and health
-        # reports the degraded state so it is visible before a user hits it.
-        logger.error("GOOGLE_API_KEY is unset; /chat will fail to answer questions")
     init_db()
-    index = build_index()  # rebuilt on every start; takes seconds
+    index = build_index()  # loaded from disk cache when available; delete storage/ to rebuild
+    # In-memory process state: Assistant wraps retrieval+LLM, documents feeds /documents.
     state["assistant"] = Assistant(index)
+    # Unique policy titles across all docstore nodes, sorted for stable UI output.
     state["documents"] = sorted(
         {n.metadata["policy_title"] for n in index.docstore.docs.values()}
     )
@@ -54,21 +61,6 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    """Log the real cause and return JSON.
-
-    Without this, any unhandled error reaches the browser as a bare text/plain
-    500 carrying no explanation, which is what made the original Gemini outage
-    so hard to diagnose from the outside.
-    """
-    logger.exception("unhandled error on %s %s", request.method, request.url.path)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"{type(exc).__name__}: {exc}"},
-    )
-
-
 def get_db():
     db = SessionLocal()
     try:
@@ -79,14 +71,7 @@ def get_db():
 
 @app.get("/health")
 def health():
-    index_ready = "assistant" in state
-    llm_configured = settings.has_google_api_key
-    return {
-        "status": "ok" if index_ready and llm_configured else "degraded",
-        "index_ready": index_ready,
-        "llm_configured": llm_configured,
-        "llm_model": settings.llm_model,
-    }
+    return {"status": "ok", "index_ready": "assistant" in state}
 
 
 @app.get("/documents")
@@ -98,7 +83,7 @@ def documents():
 def register(user_data: UserCreate, db: Session = Depends(get_db)):
     existing = db.scalar(select(User).where(User.email == user_data.email))
     if existing:
-        return {"detail": "Email already registered"}, 400
+        raise HTTPException(status_code=400, detail="Email already registered")
     user = User(
         id=uuid4().hex,
         email=user_data.email,
@@ -115,9 +100,9 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
 def login(credentials: UserLogin, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == credentials.email))
     if not user or not verify_password(credentials.password, user.hashed_password):
-        return {"detail": "Invalid email or password"}, 401
+        raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
-        return {"detail": "Account is deactivated"}, 403
+        raise HTTPException(status_code=403, detail="Account is deactivated")
     token = create_access_token(user.id, user.role)
     return TokenResponse(access_token=token, expires_in=86400)
 
@@ -136,7 +121,7 @@ def create_session_endpoint(
     return {"session_id": session.id, "expires_at": session.expires_at}
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 def chat(
     req: ChatRequest,
     db: Session = Depends(get_db),
@@ -144,16 +129,46 @@ def chat(
 ):
     session = get_valid_session(db, req.session_id)
     if session is None or session.user_id != user.id:
-        return {
-            "answer": "Session expired or invalid. Please create a new session.",
-            "answered": False,
+        # Stream protocol: newline-delimited SSE. First an error token, then
+        # done — client must handle this gracefully (no answer in history flow).
+        def error_stream():
+            yield f"event: token\ndata: Session expired or invalid. Please create a new session.\n\n"
+            yield f"event: done\ndata: {json.dumps({'answered': False, 'confidence': 0.0, 'sources': []})}\n\n"
+        return StreamingResponse(error_stream(), media_type="text/event-stream")
+
+    assistant = state["assistant"]
+
+    async def event_stream():
+        full_answer = []
+        sources = []
+        failed = False
+
+        # ask_stream is an async generator built on the async llama-index
+        # APIs, so it runs directly on this event loop — no threads needed.
+        async for event in assistant.ask_stream(req.question):
+            if event["event"] == "sources":
+                sources = json.loads(event["data"])
+            elif event["event"] == "token":
+                full_answer.append(event["data"])
+            elif event["event"] == "error":
+                failed = True
+            yield f"event: {event['event']}\ndata: {event['data']}\n\n"
+
+        if failed:
+            return  # don't persist partial answers from failed generations
+
+        # Persist the completed QA pair
+        answer_text = "".join(full_answer).strip()
+        result = {
+            "answer": answer_text,
+            "answered": not answer_text.startswith(("I couldn't find", "I can only answer")),
             "confidence": 0.0,
-            "sources": [],
+            "sources": sources,
         }
-    result = state["assistant"].ask(req.question)
-    db.add(QA(session_id=req.session_id, user_id=user.id, question=req.question, **result))
-    db.commit()
-    return result
+        db.add(QA(session_id=req.session_id, user_id=user.id, question=req.question, **result))
+        db.commit()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/history/{session_id}", response_model=list[HistoryItem])
@@ -185,10 +200,10 @@ def update_user_role(
 ):
     target = db.get(User, user_id)
     if not target:
-        return {"detail": "User not found"}, 404
+        raise HTTPException(status_code=404, detail="User not found")
     new_role = role_data.get("role")
     if new_role not in ("admin", "staff", "intern"):
-        return {"detail": "Invalid role"}, 400
+        raise HTTPException(status_code=400, detail="Invalid role")
     target.role = new_role
     db.commit()
     db.refresh(target)
@@ -203,7 +218,7 @@ def deactivate_user(
 ):
     target = db.get(User, user_id)
     if not target:
-        return {"detail": "User not found"}, 404
+        raise HTTPException(status_code=404, detail="User not found")
     target.is_active = False
     db.commit()
     return {"detail": "User deactivated"}

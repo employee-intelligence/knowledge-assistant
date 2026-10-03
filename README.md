@@ -1,12 +1,12 @@
 # Knowledge Assistant Backend
 
-Internal knowledge assistant API for Acme Technologies. Answers employee questions using RAG (Retrieval-Augmented Generation) over company policy documents, powered by Google Gemini.
+Internal knowledge assistant API for Acme Technologies. Answers employee questions using RAG (Retrieval-Augmented Generation) over company policy documents, powered by NVIDIA NIM (gpt-oss-20b + nemotron embeddings).
 
 ## Tech Stack
 
 - **Framework:** FastAPI
-- **LLM:** Google Gemini 2.5 Flash
-- **Embeddings:** Google Gemini Embedding 001
+- **LLM:** openai/gpt-oss-20b (NVIDIA NIM)
+- **Embeddings:** nvidia/nemotron-3-embed-1b (NVIDIA NIM)
 - **RAG Pipeline:** LlamaIndex
 - **Database:** PostgreSQL (SQLAlchemy ORM)
 - **Deployment:** Docker + Render
@@ -44,7 +44,7 @@ backend/
 
 - Python 3.12+
 - PostgreSQL 14+ (or use Docker below)
-- Google API key (from [Google AI Studio](https://aistudio.google.com))
+- NVIDIA API key (from [build.nvidia.com](https://build.nvidia.com))
 
 ### Option 1: Run with Docker (Recommended)
 
@@ -52,7 +52,8 @@ backend/
 # Build and run
 docker build -t knowledge-assistant .
 docker run -p 8000:8000 \
-  -e GOOGLE_API_KEY=your_key_here \
+  -e NVIDIA_API_KEY=your_key_here \
+  -e NVIDIA_EMBEDDING_API_KEY=your_key_here \
   -e DATABASE_URL=postgresql://user:password@host:5432/knowledge_assistant \
   knowledge-assistant
 ```
@@ -69,7 +70,7 @@ pip install -r requirements.txt
 
 # 3. Set up environment variables
 cp .env.example .env
-# Edit .env with your Google API key and database URL
+# Edit .env with your NVIDIA API keys and database URL
 
 # 4. Run the app
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -79,9 +80,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GOOGLE_API_KEY` | Yes | — | Google Gemini API key |
-| `LLM_MODEL` | No | `gemini-2.5-flash` | Gemini model for generation |
-| `EMBED_MODEL` | No | `gemini-embedding-001` | Gemini model for embeddings |
+| `NVIDIA_API_KEY` | Yes | — | NVIDIA API key for the LLM |
+| `NVIDIA_EMBEDDING_API_KEY` | Yes | — | NVIDIA API key for embeddings |
+| `NVIDIA_BASE_URL` | No | `https://integrate.api.nvidia.com/v1` | NVIDIA NIM OpenAI-compatible base URL |
+| `LLM_MODEL` | No | `openai/gpt-oss-20b` | Model for generation |
+| `EMBED_MODEL` | No | `nvidia/nemotron-3-embed-1b` | Model for embeddings |
 | `DATABASE_URL` | No | `postgresql://user:password@localhost:5432/knowledge_assistant` | PostgreSQL connection string |
 | `ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS origins |
 | `TOP_K` | No | `4` | Number of documents to retrieve |
@@ -220,7 +223,7 @@ curl http://localhost:8000/history/test-session-123
 The `render.yaml` at the repo root configures both the web service and PostgreSQL database automatically.
 
 1. Connect the `employee-intelligence/knowledge-assistant` repo to Render
-2. Set `GOOGLE_API_KEY` in the Render dashboard
+2. Set `NVIDIA_API_KEY` and `NVIDIA_EMBEDDING_API_KEY` in the Render dashboard
 3. Render provisions the database and injects `DATABASE_URL` automatically
 
 ## API Docs
