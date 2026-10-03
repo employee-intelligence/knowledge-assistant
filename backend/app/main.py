@@ -1,8 +1,21 @@
+import json
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
+# Knowledge Assistant API — FastAPI entrypoint.
+#
+# High-level flow per request:
+#   POST /auth/login        -> JWT
+#   POST /sessions          -> chat session id
+#   POST /chat              -> SSE stream: "sources" event, then "token" events, then "done"
+#   GET  /history/{sid}     -> persisted Q&A rows
+#
+# The llama-index VectorStoreIndex is built once at startup (see lifespan) and
+# shared read-only across requests; all conversation state lives in Postgres.
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -13,7 +26,6 @@ from app.rag.engine import Assistant
 from app.rag.ingest import build_index
 from app.schemas import (
     ChatRequest,
-    ChatResponse,
     HistoryItem,
     SessionCreateResponse,
     TokenResponse,
@@ -22,14 +34,17 @@ from app.schemas import (
     UserResponse,
 )
 
+# Shared per-process state (see lifespan). Not persisted — Postgres is the source of truth.
 state: dict = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    index = build_index()  # rebuilt on every start; takes seconds
+    index = build_index()  # loaded from disk cache when available; delete storage/ to rebuild
+    # In-memory process state: Assistant wraps retrieval+LLM, documents feeds /documents.
     state["assistant"] = Assistant(index)
+    # Unique policy titles across all docstore nodes, sorted for stable UI output.
     state["documents"] = sorted(
         {n.metadata["policy_title"] for n in index.docstore.docs.values()}
     )
@@ -106,7 +121,7 @@ def create_session_endpoint(
     return {"session_id": session.id, "expires_at": session.expires_at}
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 def chat(
     req: ChatRequest,
     db: Session = Depends(get_db),
@@ -114,16 +129,46 @@ def chat(
 ):
     session = get_valid_session(db, req.session_id)
     if session is None or session.user_id != user.id:
-        return {
-            "answer": "Session expired or invalid. Please create a new session.",
-            "answered": False,
+        # Stream protocol: newline-delimited SSE. First an error token, then
+        # done — client must handle this gracefully (no answer in history flow).
+        def error_stream():
+            yield f"event: token\ndata: Session expired or invalid. Please create a new session.\n\n"
+            yield f"event: done\ndata: {json.dumps({'answered': False, 'confidence': 0.0, 'sources': []})}\n\n"
+        return StreamingResponse(error_stream(), media_type="text/event-stream")
+
+    assistant = state["assistant"]
+
+    async def event_stream():
+        full_answer = []
+        sources = []
+        failed = False
+
+        # ask_stream is an async generator built on the async llama-index
+        # APIs, so it runs directly on this event loop — no threads needed.
+        async for event in assistant.ask_stream(req.question):
+            if event["event"] == "sources":
+                sources = json.loads(event["data"])
+            elif event["event"] == "token":
+                full_answer.append(event["data"])
+            elif event["event"] == "error":
+                failed = True
+            yield f"event: {event['event']}\ndata: {event['data']}\n\n"
+
+        if failed:
+            return  # don't persist partial answers from failed generations
+
+        # Persist the completed QA pair
+        answer_text = "".join(full_answer).strip()
+        result = {
+            "answer": answer_text,
+            "answered": not answer_text.startswith(("I couldn't find", "I can only answer")),
             "confidence": 0.0,
-            "sources": [],
+            "sources": sources,
         }
-    result = state["assistant"].ask(req.question)
-    db.add(QA(session_id=req.session_id, user_id=user.id, question=req.question, **result))
-    db.commit()
-    return result
+        db.add(QA(session_id=req.session_id, user_id=user.id, question=req.question, **result))
+        db.commit()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/history/{session_id}", response_model=list[HistoryItem])

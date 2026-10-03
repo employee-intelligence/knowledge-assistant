@@ -4,10 +4,22 @@ services:
     runtime: docker
     plan: free
     envVars:
-      - key: GOOGLE_API_KEY
+      - key: NVIDIA_API_KEY
         sync: false
+      - key: NVIDIA_EMBEDDING_API_KEY
+        sync: false
+      - key: NVIDIA_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
       - key: LLM_MODEL
-        value: gemini-2.5-flash
+        value: openai/gpt-oss-20b
+      - key: EMBED_MODEL
+        value: nvidia/nemotron-3-embed-1b
+      - key: LLM_MAX_TOKENS
+        value: "1024"
+      - key: LLM_TEMPERATURE
+        value: "0.5"
+      - key: LLM_TOP_P
+        value: "1.0"
       - key: MIN_SCORE
         value: "0.45"
       - key: ALLOWED_ORIGINS

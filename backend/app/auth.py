@@ -12,19 +12,24 @@ from app.database import User, get_db
 
 security = HTTPBearer()
 
+# JWT signing setup. Tokens are HS256-signed with settings.jwt_secret_key and
+# expire after ACCESS_TOKEN_EXPIRE_HOURS hours.
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
 
 def hash_password(password: str) -> str:
+    # bcrypt with a random salt; we store the salt inside the returned hash.
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(password: str, hashed: str) -> bool:
+    # Constant-time comparison handled by bcrypt itself.
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 
 def create_access_token(user_id: str, role: str) -> str:
+    # "sub" = subject (user id), "role" = authorization role, exp/iat = expiry/issued-at.
     payload = {
         "sub": user_id,
         "role": role,
@@ -53,6 +58,8 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
+    # FastAPI dependency: extracts the Bearer token, decodes it, and loads the
+    # user. Rejected tokens (expired/invalid/inactive) raise 401 automatically.
     payload = decode_access_token(credentials.credentials)
     user = db.get(User, payload["sub"])
     if user is None or not user.is_active:
@@ -64,6 +71,9 @@ def get_current_user(
 
 
 def require_role(*allowed_roles: str):
+    # Dependency factory: require_role("admin", "staff") returns a dependency
+    # that only passes users whose role is in the allowed set. Usage:
+    #     user: User = Depends(require_role("admin", "staff"))
     def role_checker(user: User = Depends(get_current_user)) -> User:
         if user.role not in allowed_roles:
             raise HTTPException(

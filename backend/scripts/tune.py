@@ -1,5 +1,7 @@
 from app.rag.ingest import build_index
 
+# Standalone retrieval sanity check: run `python scripts/tune.py` from backend/
+# to see which policy sections surface for each probe question and their scores.
 QUESTIONS = [
     "How many sick leave days do I get?",
     "How much annual leave can I carry over and until when?",
