@@ -215,7 +215,8 @@ so a caller cannot probe which single condition failed.
 ### `POST /api/auth/accept-invite` — rate limited
 Request: `{ "token": "...", "password": "..." }`
 - `token`: 16–64 chars.
-- `password`: 12–128 chars, must contain a letter, a digit and a symbol.
+- `password`: 8–128 chars. Length is the only rule; there is no requirement for a
+  letter, a digit or a symbol. See §13 for why the character classes were removed.
 
 Response: `200 { "user": { "id", "name", "email", "role" } }` and both cookies are
 set, so accepting an invitation signs the person straight in. The invite is marked
@@ -528,3 +529,125 @@ so and stops rather than failing obscurely further on.
 The frontend must be pointed at the local backend for these runs: set
 `API_BASE_URL` in `core/api.config.ts` to `http://127.0.0.1:8099`. Both sides must
 use `127.0.0.1` — see §10a.
+## 13. Two later changes, and why
+
+### Ownership is the account, not the browser
+
+Conversations were scoped by `client_id`: an anonymous id the browser generated and
+kept in `localStorage`, sent on every request. Nothing checked it against anything.
+It was a bearer token with no expiry, and it was the only boundary.
+
+Two people sharing a browser profile, one `localStorage` value copied between
+accounts, or a single sign-on that handed the same id to two accounts all put one
+person's threads in front of another — and `DELETE /api/conversations/{id}` let the
+other one remove them. `scripts/check_ownership.py` reproduces it against a running
+server using two accounts and one shared `client_id`.
+
+Conversations now carry `user_id`, taken from the session cookie, and every route
+scopes on that. `client_id` is still recorded, because the client sends it and the
+sidebar groups by it, but it grants nothing. `GET /api/conversations` takes no
+`client_id` at all, because a scope the caller can widen is not a scope.
+
+Rows written before the column existed have a null owner and are readable by nobody.
+A conversation with no known owner cannot be shown to a caller without guessing whose
+it was, so there is nothing to migrate them onto.
+
+The other half of the change is a gain: signing in on a second machine now brings the
+conversation list with it, instead of leaving it on whichever browser happened to ask
+the question.
+
+### The password policy is length only
+
+The policy required a letter, a digit and a symbol, and now requires only eight
+characters. The character classes measured the shape of a password rather than its
+strength and mostly produced `Passw0rd!`; length is what the evidence supports. The
+rules also rejected the passphrases people actually remember, which pushes them
+towards writing the policy on a sticky note.
+
+Enforced identically on both sides: `MIN_PASSWORD_LENGTH = 8` in
+`backend/app/schemas_auth.py`, mirrored in `frontend/src/app/core/models/auth.model.ts`
+so the form agrees with the server before the round trip.
+
+### Errors are shown as the backend words them
+
+`ApiService` used to replace every `4xx` with a generic sentence, and the auth
+screens replaced them again with sentences of their own. A `422` can be a bad email
+domain, a name over its length limit or a missing field, and one canned "that email
+address is not one this workspace accepts" applied to all three sent the reader to fix
+the one field that was fine.
+
+The backend's own wording is now passed through for any status that carries one, via
+`frontend/src/app/features/auth/utils/read-backend-refusal.ts`. `readRefusalOr` is the
+single call every failure mapper uses.
+
+Status `0` and `5xx` are the deliberate exceptions: there is no server wording worth
+showing for a request that never arrived or failed inside the backend.
+
+That reader accepts **both** error shapes, which is the detail worth keeping.
+`ApiService` reduces a conversation failure to an `ApiError` carrying the wording in
+`message`; `AuthService` lets the raw `HttpErrorResponse` through, where the same
+wording sits on `error.detail`. Handling one shape loses the reason on every screen
+of the other — which is exactly what happened to `409`s, read from a property neither
+shape carries on the path they actually take.
+
+## 14. Testing the boundary adversarially
+
+`scripts/check_security.py` is a list of attempts rather than a list of use cases,
+because "the auth tests pass" says nothing about which attacks were tried. It signs
+in as real accounts over real HTTP, attempts each of the following, and reports every
+one as a pass only if it was **refused**.
+
+Run it with `.venv/bin/python scripts/check_security.py`. It creates and removes its
+own accounts. It waits out the sign-in rate limit rather than failing on it, because
+hitting that limit is the limiter working and a silent `429` reads as a broken
+account.
+
+### What it attempts
+
+| Area | Attempts |
+|---|---|
+| Signed out | Every authenticated route, unauthenticated |
+| Role | Each admin-only route, as an employee |
+| Escalation | `role: "admin"` in the body of every route that accepts a role |
+| Cross-account | Read, list, rename, delete, post into, and edit another account's conversation — while presenting the **same `client_id`** |
+| Existence | A missing id against an id belonging to somebody else, byte for byte |
+| Tokens | Signature stripped, payload edited, signed by another key, invented |
+| Replay | One refresh token presented twice, then a third time from a "stolen" copy |
+| Lifecycle | An account deactivated mid-session; a signed-out session |
+| Bootstrap | A second administrator, holding the real `AUTH_BOOTSTRAP_KEY` |
+| Confidentiality | Salary and personal-record questions, direct and indirect |
+| Public surface | `/health` and `/documents` for anything sensitive |
+
+44 attempts. All are expected to be refused.
+
+### Two results worth stating rather than assuming
+
+**A refresh token replay takes the family with it.** Presenting the same refresh
+token twice is refused, and so is a *different* copy of that same token afterwards.
+The second part is the one that matters: without it, a stolen cookie stays a valid
+session after the theft is noticed, which is the case the whole family-revocation
+mechanism exists for.
+
+Note how this is tested. The obvious version of the test passes for the wrong reason —
+the cookie jar holds the *rotated* token after the first refresh, so the second call
+is a fresh token legitimately entitled to work. The jar has to be cleared and the
+original re-issued, or the test is asserting nothing.
+
+**An administrator cannot read an employee's conversations.** `GET
+/api/conversations/{id}` scopes on the account, so an admin gets a `404` for anyone
+else's thread — the same answer as for an id that does not exist.
+
+This is privacy-safe and it is currently also a product limitation: there is no route
+by which HR or management can review what was asked in an account, which a
+compliance investigation would need. If that is wanted, it should be a separate
+route with its own audit trail rather than a widening of this one — an admin who can
+browse every employee's questions by id is a much larger surface than one deliberate
+route with a recorded reason.
+
+### The admin question-log screen is fed from mock data
+
+There is no API route serving question logs, and the screen reads
+`MOCK_QUESTION_LOGS`. So no real user's question is exposed to an administrator
+today. Worth knowing before that screen is wired to real data, because the moment it
+is, every question every employee has asked becomes readable by anyone with the admin
+role — including questions about other people.

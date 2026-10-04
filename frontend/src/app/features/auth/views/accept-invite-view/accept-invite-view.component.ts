@@ -254,7 +254,14 @@ export class AcceptInviteViewComponent {
     }
   }
 
-  /** The rules the new password has to satisfy, and whether each is met. */
+  /**
+   * The rules the new password has to satisfy, and whether each is met.
+   *
+   * Length, and nothing else — the backend's policy, kept identical so the checklist
+   * here agrees with what will actually be accepted. The character-class rules this
+   * used to list are gone: they measure the shape of a password rather than its
+   * strength, and mainly produce `Passw0rd!`.
+   */
   protected readonly rules = computed<PasswordRule[]>(() => {
     const value = this.password();
 
@@ -263,8 +270,6 @@ export class AcceptInviteViewComponent {
         label: `At least ${MIN_PASSWORD_LENGTH} characters`,
         met: value.length >= MIN_PASSWORD_LENGTH,
       },
-      { label: 'At least one number', met: /\d/.test(value) },
-      { label: 'At least one symbol', met: /[^A-Za-z0-9]/.test(value) },
     ];
   });
 
