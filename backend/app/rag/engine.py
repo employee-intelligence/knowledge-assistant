@@ -1,10 +1,20 @@
 import logging
 import time
 
-from google.genai.errors import APIError, ClientError, ServerError
 from llama_index.core import VectorStoreIndex
 from llama_index.core.schema import MetadataMode
-from llama_index.llms.google_genai import GoogleGenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    NotFoundError,
+    OpenAI,
+    PermissionDeniedError,
+    RateLimitError,
+)
 
 from app.config import settings
 from app.rag.guard import is_personal_question
@@ -54,7 +64,7 @@ Answer:"""
 
 
 class LlmUnavailable(Exception):
-    """No configured Gemini model could produce an answer.
+    """No configured NVIDIA model could produce an answer.
 
     Carries the upstream reason so the route can log it and tell an operator what
     actually went wrong, rather than the caller seeing an opaque 500.
@@ -68,29 +78,53 @@ class LlmUnavailable(Exception):
 class Assistant:
     def __init__(self, index: VectorStoreIndex):
         self.retriever = index.as_retriever(similarity_top_k=settings.top_k)
-        self._client: GoogleGenAI | None = None
+        self._client: OpenAI | None = None
+
+    def _nvidia_client(self) -> OpenAI:
+        """The OpenAI-compatible client for NVIDIA's API, built once."""
+        if self._client is None:
+            self._client = OpenAI(
+                api_key=settings.nvidia_api_key,
+                base_url=settings.nvidia_base_url,
+            )
+        return self._client
 
     def _complete(self, prompt: str) -> tuple[str, str]:
         """Answer via the first model in the chain that works, with retries.
 
-        Upstream Gemini calls fail in two very different ways and the difference
-        decides what to do next: a 5xx/UNAVAILABLE is load that usually clears, so
-        it is worth waiting on, while a 4xx means the model is retired or the key
-        is rejected and retrying the same call can only fail again.
+        NVIDIA serves an OpenAI-compatible API, so the OpenAI SDK talks to it
+        with nothing changed but the base URL. Upstream calls fail in two very
+        different ways and the difference decides what to do next: a 5xx or a
+        rate limit is load that usually clears, so it is worth waiting on, while
+        a 4xx means the model is retired or the key is rejected and retrying the
+        same call can only fail again.
         """
         failures: list[str] = []
 
-        for model in settings.llm_models:
-            try:
-                client = GoogleGenAI(model=model, api_key=settings.google_api_key)
-            except Exception as exc:
-                failures.append(f"{model}: client init failed: {exc}")
-                continue
+        if not settings.has_nvidia_api_key:
+            raise LlmUnavailable("NVIDIA_API_KEY is unset")
 
+        try:
+            client = self._nvidia_client()
+        except Exception as exc:
+            raise LlmUnavailable(f"client init failed: {exc}") from exc
+
+        for model in settings.llm_models:
             for attempt in range(1, settings.llm_max_attempts + 1):
                 try:
-                    return client.complete(prompt).text.strip(), model
-                except ServerError as exc:
+                    completion = client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=settings.llm_temperature,
+                        top_p=settings.llm_top_p,
+                        max_tokens=settings.llm_max_tokens,
+                    )
+                    text = (completion.choices[0].message.content or "").strip()
+                    if not text:
+                        failures.append(f"{model} attempt {attempt}: model returned no content")
+                        continue
+                    return text, model
+                except (InternalServerError, RateLimitError, APIConnectionError, APITimeoutError) as exc:
                     failures.append(f"{model} attempt {attempt}: upstream {exc}")
                     if attempt < settings.llm_max_attempts:
                         delay = settings.llm_retry_base_seconds * (2 ** (attempt - 1))
@@ -99,12 +133,12 @@ class Assistant:
                             model, attempt, settings.llm_max_attempts, delay,
                         )
                         time.sleep(delay)
-                except ClientError as exc:
+                except (AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError) as exc:
                     # 404: model retired. 403: key rejected. Neither gets better
                     # by asking again, so move straight to the next model.
                     failures.append(f"{model}: rejected by API: {exc}")
                     break
-                except APIError as exc:
+                except APIStatusError as exc:
                     failures.append(f"{model} attempt {attempt}: {exc}")
                     break
 
@@ -152,31 +186,5 @@ class Assistant:
         return {"answer": text, "answered": True, "confidence": confidence, "sources": sources}
 
     def generate_title(self, question: str) -> str:
-        """Generates a short title for a conversation from its first question."""
-        if not self._client:
-            return truncate_title(question)
-
-        title_prompt = (
-            "Generate a short, descriptive title (max 50 chars) for a conversation "
-            "starting with this question. No quotes, no punctuation at the end.\n\n"
-            f"Question: {question}\nTitle:"
-        )
-        try:
-            # Try the llama_index GoogleGenAI interface first
-            if hasattr(self._client, 'complete'):
-                response = self._client.complete(title_prompt)
-                title = response.text.strip().strip('"\'')
-                return truncate_title(title)
-            # Fallback to OpenAI-compatible interface (used in tests)
-            elif hasattr(self._client, 'chat') and hasattr(self._client.chat, 'completions'):
-                response = self._client.chat.completions.create(
-                    model="title-generator",
-                    messages=[{"role": "user", "content": title_prompt}],
-                    max_tokens=TITLE_MAX_TOKENS,
-                )
-                title = response.choices[0].message.content.strip().strip('"\'').rstrip('.')
-                return truncate_title(title)
-            else:
-                return truncate_title(question)
-        except Exception:
-            return truncate_title(question)
+        """Names a session after its first question, truncated to fit the list."""
+        return truncate_title(question)

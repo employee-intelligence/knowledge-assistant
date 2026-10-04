@@ -31,10 +31,10 @@ state: dict = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not settings.has_google_api_key:
+    if not settings.has_nvidia_api_key:
         # Not fatal: the guard and retrieval-only paths still work, and health
         # reports the degraded state so it is visible before a user hits it.
-        logger.error("GOOGLE_API_KEY is unset; /chat will fail to answer questions")
+        logger.error("NVIDIA_API_KEY is unset; /chat will fail to answer questions")
     init_db()
     index = build_index()  # rebuilt on every start; takes seconds
     state["assistant"] = Assistant(index)
@@ -80,7 +80,7 @@ def get_db():
 @app.get("/health")
 def health():
     index_ready = "assistant" in state
-    llm_configured = settings.has_google_api_key
+    llm_configured = settings.has_nvidia_api_key
     return {
         "status": "ok" if index_ready and llm_configured else "degraded",
         "index_ready": index_ready,
@@ -98,7 +98,7 @@ def documents():
 def register(user_data: UserCreate, db: Session = Depends(get_db)):
     existing = db.scalar(select(User).where(User.email == user_data.email))
     if existing:
-        return {"detail": "Email already registered"}, 400
+        raise HTTPException(status_code=400, detail="Email already registered")
     user = User(
         id=uuid4().hex,
         email=user_data.email,
@@ -115,9 +115,9 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
 def login(credentials: UserLogin, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == credentials.email))
     if not user or not verify_password(credentials.password, user.hashed_password):
-        return {"detail": "Invalid email or password"}, 401
+        raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
-        return {"detail": "Account is deactivated"}, 403
+        raise HTTPException(status_code=403, detail="Account is deactivated")
     token = create_access_token(user.id, user.role)
     return TokenResponse(access_token=token, expires_in=86400)
 
@@ -185,10 +185,10 @@ def update_user_role(
 ):
     target = db.get(User, user_id)
     if not target:
-        return {"detail": "User not found"}, 404
+        raise HTTPException(status_code=404, detail="User not found")
     new_role = role_data.get("role")
     if new_role not in ("admin", "staff", "intern"):
-        return {"detail": "Invalid role"}, 400
+        raise HTTPException(status_code=400, detail="Invalid role")
     target.role = new_role
     db.commit()
     db.refresh(target)
@@ -203,7 +203,7 @@ def deactivate_user(
 ):
     target = db.get(User, user_id)
     if not target:
-        return {"detail": "User not found"}, 404
+        raise HTTPException(status_code=404, detail="User not found")
     target.is_active = False
     db.commit()
     return {"detail": "User deactivated"}

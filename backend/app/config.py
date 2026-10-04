@@ -8,13 +8,12 @@ class Settings(BaseSettings):
     # it with nothing changed but the base URL.
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    # Chosen for time-to-first-token, not size. The previous default
-    # (`z-ai/glm-5.3-flash`) reasoned for ~90s before writing a word, which no
-    # amount of streaming can make feel responsive; this one starts in ~2s on the
-    # same retrieval prompt while still following the answer-only-from-context
-    # instructions. Verified provisioned on the generation key, unlike several
-    # other fast candidates (nemotron-nano-3-30b, mistral-7b-instruct) which 404.
+    # Answering model and its fallbacks, as `LLM_MODEL` and
+    # `LLM_FALLBACK_MODELS` in `.env` (see `.env.example`). Tried in order by
+    # `Assistant._complete`: a 5xx is retried with backoff, a 4xx moves straight
+    # to the next model.
     llm_model: str = "openai/gpt-oss-20b"
+    llm_fallback_models: str = ""
     llm_temperature: float = 0.5
     llm_top_p: float = 1
     llm_max_tokens: int = 1024
@@ -53,6 +52,14 @@ class Settings(BaseSettings):
     @property
     def has_nvidia_embedding_api_key(self) -> bool:
         return bool(self.nvidia_embedding_api_key.strip())
+
+    @property
+    def llm_models(self) -> list[str]:
+        """Answering models in try order: the primary first, then fallbacks."""
+        models = [self.llm_model.strip()] + [
+            model.strip() for model in self.llm_fallback_models.split(",")
+        ]
+        return [model for model in models if model]
 
 
 settings = Settings()
