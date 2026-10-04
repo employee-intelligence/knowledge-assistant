@@ -135,7 +135,7 @@ export class ApiService {
         role: 'assistant' as const,
         text: item.answer,
         createdAt: parseUtcTimestamp(item.created_at),
-        status: 'answered' as const,
+        status: item.answered ? ('answered' as const) : ('not-found' as const),
         sources: (item.sources ?? []).map((source) => this.toSource(source)),
         documentCount: new Set((item.sources ?? []).map((s) => s.document)).size,
       },

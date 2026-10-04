@@ -2,6 +2,17 @@ import { Routes } from '@angular/router';
 
 import { authGuard, adminGuard, guestGuard } from './core/guards/auth.guard';
 
+/**
+ * Each view is lazily loaded, so the initial bundle only carries the shell.
+ *
+ * `chat/:sessionId` addresses one session by its own id, which never changes,
+ * so the link keeps working however long afterwards it is followed. The bare
+ * `chat` route follows the session that was last active, which is where a
+ * question sent from the dashboard lands.
+ *
+ * Signed-out screens declare `data: { plain: true }`, which is how the shell
+ * knows to drop the sidebar there rather than cover it up.
+ */
 export const routes: Routes = [
   {
     path: '',
@@ -14,22 +25,22 @@ export const routes: Routes = [
       ),
   },
   {
-    path: 'chat/:sessionId',
-    title: 'Chat · Internal Knowledge Assistant',
+    path: 'chat',
+    pathMatch: 'full',
+    title: 'New chat · Internal Knowledge Assistant',
     canActivate: [authGuard],
     loadComponent: () =>
-      import('./views/chat-view/chat-view.component').then(
-        (module) => module.ChatViewComponent,
+      import('./views/response-view/response-view.component').then(
+        (module) => module.ResponseViewComponent,
       ),
   },
   {
-    path: 'chat',
-    pathMatch: 'full',
-    title: 'New Chat · Internal Knowledge Assistant',
+    path: 'chat/:sessionId',
+    title: 'Answer · Internal Knowledge Assistant',
     canActivate: [authGuard],
     loadComponent: () =>
-      import('./views/chat-view/chat-view.component').then(
-        (module) => module.ChatViewComponent,
+      import('./views/response-view/response-view.component').then(
+        (module) => module.ResponseViewComponent,
       ),
   },
   {
@@ -37,8 +48,8 @@ export const routes: Routes = [
     title: 'Sessions · Internal Knowledge Assistant',
     canActivate: [authGuard],
     loadComponent: () =>
-      import('./views/sessions-view/sessions-view.component').then(
-        (module) => module.SessionsViewComponent,
+      import('./views/conversations-view/conversations-view.component').then(
+        (module) => module.ConversationsViewComponent,
       ),
   },
   {
@@ -54,6 +65,7 @@ export const routes: Routes = [
     path: 'login',
     title: 'Sign in · Internal Knowledge Assistant',
     canActivate: [guestGuard],
+    data: { plain: true },
     loadComponent: () =>
       import('./features/auth/views/login-view/login-view.component').then(
         (module) => module.LoginViewComponent,
@@ -63,6 +75,7 @@ export const routes: Routes = [
     path: 'register',
     title: 'Register · Internal Knowledge Assistant',
     canActivate: [guestGuard],
+    data: { plain: true },
     loadComponent: () =>
       import('./features/auth/views/register-view/register-view.component').then(
         (module) => module.RegisterViewComponent,
@@ -71,6 +84,7 @@ export const routes: Routes = [
   {
     path: 'health',
     title: 'Health Check · Internal Knowledge Assistant',
+    data: { plain: true },
     loadComponent: () =>
       import('./views/health-view/health-view.component').then(
         (module) => module.HealthViewComponent,

@@ -1,106 +1,80 @@
-import { Component, inject } from '@angular/core';
-import { Router, RouterLink } from '@angular/router';
+import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
+import { Router } from '@angular/router';
 
 import { AuthService } from '../../core/services/auth.service';
 import { ChatService } from '../../core/services/chat.service';
-import { SessionService } from '../../core/services/session.service';
+import { QuestionInputComponent } from '../../features/ask/components/question-input/question-input.component';
+import { SuggestionListComponent } from '../../features/ask/components/suggestion-list/suggestion-list.component';
+import { ViewHeaderComponent } from '../../features/chat/components/view-header/view-header.component';
+import { STARTER_QUESTIONS } from '../../shared/utils/constants';
 
+/**
+ * The landing view: a centred prompt, the starter questions, and the composer.
+ * A view only assembles components and connects them to services.
+ */
 @Component({
   selector: 'app-dashboard-view',
-  standalone: true,
-  imports: [RouterLink],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [QuestionInputComponent, SuggestionListComponent, ViewHeaderComponent],
+  host: { class: 'flex min-h-0 flex-1 flex-col' },
   template: `
-    <div class="flex h-dvh flex-col bg-background">
-      <header class="border-b bg-card px-4 py-3">
-        <div class="flex items-center justify-between">
-          <h1 class="text-xl font-semibold text-foreground">Internal Knowledge Assistant</h1>
-          <div class="flex items-center gap-4">
-            <span class="text-sm text-muted-foreground">{{ auth.displayName() }}</span>
-            <button
-              (click)="onSignOut()"
-              class="rounded-md border border-input bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring"
-            >
-              Sign out
-            </button>
-          </div>
+    <!-- The header carries only the sidebar toggle; the design's hero has no title. -->
+    <app-view-header />
+
+    <div class="scrollbar-thin flex min-h-0 flex-1 flex-col items-center justify-center px-4 py-8">
+      <div class="flex w-full max-w-2xl flex-col items-center">
+        <!--
+          The first name, not the full name. This is the first thing on the screen and
+          it is the only place in the app that greets, so it is the only place the
+          greeting has to be right.
+        -->
+        <h2 class="text-center font-headings text-2xl font-semibold text-foreground">
+          How can I help{{ firstName() ? ', ' + firstName() : '' }}?
+        </h2>
+
+        <div class="mt-6 w-full max-w-[520px]">
+          <app-suggestion-list [suggestions]="starterQuestions" (chosen)="onAsk($event)" />
         </div>
-      </header>
 
-      <main class="flex-1 flex items-center justify-center px-4">
-        <div class="w-full max-w-3xl text-center">
-          <div class="mb-8">
-            <svg class="mx-auto h-16 w-16 text-muted-foreground/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-            </svg>
-          </div>
-          <h2 class="text-3xl font-bold text-foreground mb-4">Ask me anything</h2>
-          <p class="text-lg text-muted-foreground mb-8">
-            I can help you find answers from your company's knowledge base.
-            Start a new chat session to begin.
-          </p>
-
-          <div class="space-y-4">
-            <button
-              (click)="startNewChat()"
-              [disabled]="chat.isSending()"
-              class="w-full rounded-md bg-primary px-6 py-3 text-lg font-medium text-primary-foreground hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50"
-            >
-              @if (chat.isSending()) {
-                <span class="flex items-center justify-center gap-2">
-                  <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none" />
-                    <path class="opacity-75" d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-width="4" fill="none" stroke-linecap="round" />
-                  </svg>
-                  Starting...
-                </span>
-              } @else {
-                Start a new chat
-              }
-            </button>
-
-            <button
-              (click)="router.navigate(['/sessions'])"
-              class="w-full rounded-md border border-input bg-background px-6 py-3 text-lg font-medium text-foreground hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-            >
-              View all sessions
-            </button>
-          </div>
-
-          @if (auth.isAdmin()) {
-            <div class="mt-8 pt-8 border-t">
-              <a
-                routerLink="/admin"
-                class="text-sm text-primary hover:underline"
-              >
-                Go to Admin Dashboard
-              </a>
-            </div>
-          }
+        <div class="mt-8 w-full max-w-[640px]">
+          <app-question-input [isBusy]="chat.isLoading()" (ask)="onAsk($event)" />
         </div>
-      </main>
+      </div>
     </div>
   `,
 })
 export class DashboardViewComponent {
-  protected readonly auth = inject(AuthService);
+  /** Current conversation state, including the loading flag for the composer. */
   protected readonly chat = inject(ChatService);
-  private readonly sessions = inject(SessionService);
+
+  /** Who is signed in, which is what the greeting names. */
+  private readonly auth = inject(AuthService);
+
+  /** Starter prompts, which are product copy rather than data from the backend. */
+  protected readonly starterQuestions = STARTER_QUESTIONS;
+
+  /**
+   * The signed-in person's name, or nothing.
+   *
+   * The backend stores no display name, so this is the part of the address
+   * before the `@`. Empty rather than a placeholder: before the session
+   * resolves the greeting is simply "How can I help?", which is correct at
+   * every point where the name is not yet known.
+   */
+  protected readonly firstName = computed(() => this.auth.displayName());
+
   private readonly router = inject(Router);
 
-  protected startNewChat(): void {
-    this.sessions.create().subscribe({
-      next: (session) => {
-        this.router.navigate(['/chat', session.id]);
-      },
-      error: () => {
-        // Session service handles errors
-      },
-    });
-  }
+  /**
+   * Asks a question and routes to the chat view.
+   *
+   * The route carries no id: `/chat` follows the session the question was asked
+   * in, so the question just sent is the one that opens. That also means the
+   * view does not have to wait for the request to start before it can navigate.
+   */
+  protected onAsk(question: string): void {
+    this.chat.ask(question);
 
-  protected onSignOut(): void {
-    this.auth.logout().subscribe({
-      next: () => this.router.navigate(['/login']),
-    });
+    void this.router.navigate(['/chat']);
   }
 }

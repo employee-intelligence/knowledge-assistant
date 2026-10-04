@@ -1,15 +1,17 @@
-import { Component, inject, OnInit, signal } from '@angular/core';
+import { Component, computed, inject, OnInit, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
 
 import { AuthService } from '../../core/services/auth.service';
 import { ApiService, ApiError } from '../../core/services/api.service';
+import { SessionService } from '../../core/services/session.service';
 import { UserDto, Role, ROLE_LABELS } from '../../core/models/auth.model';
+import { StatCardComponent } from '../../features/admin/components/stat-card/stat-card.component';
 
 @Component({
   selector: 'app-admin-view',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, StatCardComponent],
   template: `
     <div class="flex h-dvh flex-col bg-background">
       <header class="border-b bg-card px-4 py-3">
@@ -37,6 +39,12 @@ import { UserDto, Role, ROLE_LABELS } from '../../core/models/auth.model';
 
       <main class="flex-1 overflow-y-auto px-4 py-6">
         <div class="max-w-4xl mx-auto w-full">
+          <div class="mb-6 grid gap-3 sm:grid-cols-3">
+            <app-stat-card label="Users" [value]="userCount()" detail="Registered accounts" icon="users" />
+            <app-stat-card label="Sessions" [value]="sessionCount()" detail="Started in this browser" icon="message-square-text" />
+            <app-stat-card label="Documents" [value]="documentCount()" detail="Indexed policies" icon="file-text" />
+          </div>
+
           <div class="mb-6">
             <h2 class="text-lg font-medium text-foreground">User Management</h2>
             <p class="text-sm text-muted-foreground">Manage user roles and access</p>
@@ -126,16 +134,25 @@ export class AdminViewComponent implements OnInit {
   private readonly api = inject(ApiService);
   protected readonly auth = inject(AuthService);
   private readonly router = inject(Router);
+  private readonly sessions = inject(SessionService);
 
   protected readonly users = signal<UserDto[]>([]);
   protected readonly isLoading = signal(false);
   protected readonly error = signal<string | null>(null);
   protected readonly deactivatingIds = signal<Set<string>>(new Set());
+  protected readonly documents = signal<string[]>([]);
 
   protected readonly roleLabels = ROLE_LABELS;
+  protected readonly userCount = computed(() => String(this.users().length));
+  protected readonly sessionCount = computed(() => String(this.sessions.conversations().length));
+  protected readonly documentCount = computed(() => String(this.documents().length));
 
   ngOnInit(): void {
     this.loadUsers();
+    this.api.getDocuments().subscribe({
+      next: (documents) => this.documents.set(documents),
+      error: () => this.documents.set([]),
+    });
   }
 
   protected loadUsers(): void {
