@@ -1,9 +1,8 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, create_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
-
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, create_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from app.config import settings
 
 _args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
@@ -15,69 +14,78 @@ class Base(DeclarativeBase):
     pass
 
 
-class Conversation(Base):
-    __tablename__ = "conversations"
+class User(Base):
+    __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    client_id: Mapped[str] = mapped_column(String(64), index=True)
-    title: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-
-    messages: Mapped[list["Message"]] = relationship(
-        back_populates="conversation",
-        cascade="all, delete-orphan",
-        order_by="Message.created_at",
-    )
-
-
-class Message(Base):
-    __tablename__ = "messages"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("conversations.id", ondelete="CASCADE"), index=True
-    )
-    role: Mapped[str] = mapped_column(String(16))
-    content: Mapped[str] = mapped_column(Text)
-    sources: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    hashed_password: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(20), default="staff")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+
+class ChatSession(Base):
+    __tablename__ = "sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-def create_conversation(db: SessionLocal, client_id: str) -> Conversation:
-    conversation = Conversation(id=uuid4().hex, client_id=client_id)
-    db.add(conversation)
+class QA(Base):
+    __tablename__ = "history"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"), index=True)
+    question: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    answered: Mapped[bool] = mapped_column(Boolean)
+    confidence: Mapped[float] = mapped_column(default=0.0)
+    sources: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
+def create_session(db: Session, user_id: str, ttl_hours: int = 24) -> ChatSession:
+    session = ChatSession(
+        id=uuid4().hex,
+        user_id=user_id,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=ttl_hours),
+    )
+    db.add(session)
     db.commit()
-    db.refresh(conversation)
-    return conversation
+    db.refresh(session)
+    return session
 
 
-def get_owned_conversation(
-    db: SessionLocal, conversation_id: str, client_id: str
-) -> Conversation | None:
-    """The conversation, but only if it belongs to the calling client.
-
-    Conversations carry no shared secret, so ownership is the whole boundary:
-    a client that knows an id it does not own is answered exactly like a client
-    that guessed an id that never existed, instead of being told it exists.
-    """
-    conversation = db.get(Conversation, conversation_id)
-    if conversation is None or conversation.client_id != client_id:
+def get_valid_session(db: Session, session_id: str) -> ChatSession | None:
+    session = db.get(ChatSession, session_id)
+    if session is None:
         return None
-    return conversation
+    expires_at = session.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        db.delete(session)
+        db.commit()
+        return None
+    return session
 
 
-def touch(db: SessionLocal, conversation: Conversation) -> None:
-    conversation.updated_at = datetime.now(timezone.utc)
-    db.commit()
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def init_db() -> None:

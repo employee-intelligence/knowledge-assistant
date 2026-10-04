@@ -1,43 +1,37 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, EmailStr
 
 
-class ConversationCreateRequest(BaseModel):
-    client_id: str = Field(min_length=8, max_length=64)
+class ChatRequest(BaseModel):
+    session_id: str = Field(min_length=8, max_length=64)
+    question: str = Field(min_length=3, max_length=500)
 
 
-class ConversationCreateResponse(BaseModel):
-    id: str
-    title: str | None = None
-    created_at: datetime
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=100)
+    role: str = Field(default="staff", pattern="^(admin|staff|intern)$")
 
 
-class ConversationSummary(BaseModel):
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    title: str | None
-    updated_at: datetime
+    email: EmailStr
+    role: str
+    is_active: bool
+    created_at: datetime
 
 
-class ConversationListResponse(BaseModel):
-    conversations: list[ConversationSummary]
-
-
-class ConversationDetailResponse(BaseModel):
-    id: str
-    title: str | None
-    messages: list["MessageDto"] = []
-
-
-class MessageSendRequest(BaseModel):
-    client_id: str = Field(min_length=8, max_length=64)
-    content: str = Field(min_length=3, max_length=500)
-
-
-class ConversationRenameRequest(BaseModel):
-    client_id: str = Field(min_length=8, max_length=64)
-    title: str = Field(min_length=1, max_length=120)
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
 
 
 class Source(BaseModel):
@@ -47,14 +41,24 @@ class Source(BaseModel):
     score: float
 
 
-class MessageDto(BaseModel):
+class ChatResponse(BaseModel):
+    answer: str
+    answered: bool
+    confidence: float = 0.0
+    sources: list[Source] = []
+
+
+class SessionCreateResponse(BaseModel):
+    session_id: str
+    expires_at: datetime
+
+
+class HistoryItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    role: str
-    content: str
-    sources: list[Source] | None = None
+    question: str
+    answer: str
+    answered: bool
+    confidence: float = 0.0
+    sources: list[Source]
     created_at: datetime
-
-
-ConversationDetailResponse.model_rebuild()

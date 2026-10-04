@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     min_score: float = 0.40
     database_url: str = "postgresql://user:password@localhost:5432/knowledge_assistant"
     allowed_origins: str = "*"
+    jwt_secret_key: str = "change-me-in-production"
 
     # Per-model attempts before giving up. A 429/5xx is load that usually clears,
     # so it is worth waiting on; a 4xx is a rejected key or a model the account

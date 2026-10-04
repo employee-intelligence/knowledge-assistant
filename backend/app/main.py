@@ -1,37 +1,27 @@
-import json
 import logging
-import threading
-from collections.abc import Iterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import create_access_token, get_current_user, hash_password, require_role, verify_password
 from app.config import settings
-from app.database import (
-    Conversation,
-    Message,
-    SessionLocal,
-    create_conversation,
-    get_owned_conversation,
-    init_db,
-    touch,
-)
-from app.rag.engine import Assistant, LlmUnavailable
+from app.database import QA, User, SessionLocal, create_session, get_valid_session, init_db
+from app.rag.engine import Assistant
 from app.rag.ingest import build_index
 from app.schemas import (
-    ConversationCreateRequest,
-    ConversationCreateResponse,
-    ConversationDetailResponse,
-    ConversationListResponse,
-    ConversationRenameRequest,
-    ConversationSummary,
-    MessageSendRequest,
+    ChatRequest,
+    ChatResponse,
+    HistoryItem,
+    SessionCreateResponse,
+    TokenResponse,
+    UserCreate,
+    UserLogin,
+    UserResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,14 +31,10 @@ state: dict = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not settings.has_nvidia_api_key:
-        # Reported, not raised: message routes answer 503 and /health reports
-        # degraded, so a missing key is visible without a stack trace.
-        logger.error("NVIDIA_API_KEY is unset; questions will fail to be answered")
-    if not settings.has_nvidia_embedding_api_key:
-        # Unlike the generation key this one is fatal: the policy documents are
-        # embedded while the index is built, so startup fails without it.
-        logger.error("NVIDIA_EMBEDDING_API_KEY is unset; the index cannot be built")
+    if not settings.has_google_api_key:
+        # Not fatal: the guard and retrieval-only paths still work, and health
+        # reports the degraded state so it is visible before a user hits it.
+        logger.error("GOOGLE_API_KEY is unset; /chat will fail to answer questions")
     init_db()
     index = build_index()  # rebuilt on every start; takes seconds
     state["assistant"] = Assistant(index)
@@ -73,7 +59,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     """Log the real cause and return JSON.
 
     Without this, any unhandled error reaches the browser as a bare text/plain
-    500 carrying no explanation, which is what made the original upstream outage
+    500 carrying no explanation, which is what made the original Gemini outage
     so hard to diagnose from the outside.
     """
     logger.exception("unhandled error on %s %s", request.method, request.url.path)
@@ -91,38 +77,14 @@ def get_db():
         db.close()
 
 
-def open_db() -> Session:
-    """A session of its own, for work that outlives the request that started it."""
-    return SessionLocal()
-
-
-def owned_conversation_or_404(
-    db: Session, conversation_id: str, client_id: str | None
-):
-    """The conversation the caller may touch, or a 404 that leaks nothing.
-
-    Conversations carry no shared secret, so a missing id and an id owned by
-    someone else answer the same way. The client_id always comes from the
-    caller, never from the conversation, so one client cannot read or delete
-    another's by guessing ids.
-    """
-    if client_id is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    conversation = get_owned_conversation(db, conversation_id, client_id)
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    return conversation
-
-
 @app.get("/health")
 def health():
     index_ready = "assistant" in state
-    llm_configured = settings.has_nvidia_api_key
+    llm_configured = settings.has_google_api_key
     return {
         "status": "ok" if index_ready and llm_configured else "degraded",
         "index_ready": index_ready,
         "llm_configured": llm_configured,
-        "embedding_configured": settings.has_nvidia_embedding_api_key,
         "llm_model": settings.llm_model,
     }
 
@@ -132,237 +94,116 @@ def documents():
     return state["documents"]
 
 
-@app.post("/api/conversations", response_model=ConversationCreateResponse)
-def create_conversation_endpoint(
-    req: ConversationCreateRequest,
-    db: Session = Depends(get_db),
-):
-    """Opens a conversation for a client.
-
-    The only place a conversation is created, and it only runs on an explicit
-    "New conversation": a message posted to a conversation id appends to that
-    conversation and never creates one. `client_id` marks who the conversation
-    belongs to, so every other route scopes its lookup by the same value the
-    client sends.
-    """
-    conversation = create_conversation(db, req.client_id)
-    logger.info("created conversation %s for client %s", conversation.id, req.client_id)
-    return conversation
-
-
-@app.get("/api/conversations", response_model=ConversationListResponse)
-def list_conversations(
-    client_id: str = Query(min_length=8, max_length=64),
-    db: Session = Depends(get_db),
-):
-    """The client's conversations, most recently active first.
-
-    The whole sidebar: one entry per conversation, not per message, so starting
-    a new conversation adds one row and asking follow-ups never does.
-    """
-    conversations = db.scalars(
-        select(Conversation)
-        .where(Conversation.client_id == client_id)
-        .order_by(Conversation.updated_at.desc())
-    ).all()
-    return {"conversations": conversations}
-
-
-@app.get("/api/conversations/{conversation_id}", response_model=ConversationDetailResponse)
-def get_conversation(
-    conversation_id: str,
-    client_id: str = Query(min_length=8, max_length=64),
-    db: Session = Depends(get_db),
-):
-    """One conversation's full thread, oldest message first."""
-    conversation = owned_conversation_or_404(db, conversation_id, client_id)
-    return {
-        "id": conversation.id,
-        "title": conversation.title,
-        "messages": conversation.messages,
-    }
-
-
-@app.patch("/api/conversations/{conversation_id}", response_model=ConversationSummary)
-def rename_conversation(
-    conversation_id: str,
-    req: ConversationRenameRequest,
-    db: Session = Depends(get_db),
-):
-    """Renames a conversation. The generated title is only a default."""
-
-    conversation = owned_conversation_or_404(db, conversation_id, req.client_id)
-    conversation.title = req.title.strip()
-    touch(db, conversation)
-    return conversation
-
-
-@app.delete("/api/conversations/{conversation_id}")
-def delete_conversation(
-    conversation_id: str,
-    client_id: str = Query(min_length=8, max_length=64),
-    db: Session = Depends(get_db),
-):
-    """Removes a conversation and its messages from the client's list."""
-    conversation = owned_conversation_or_404(db, conversation_id, client_id)
-    db.delete(conversation)
+@app.post("/auth/register", response_model=UserResponse)
+def register(user_data: UserCreate, db: Session = Depends(get_db)):
+    existing = db.scalar(select(User).where(User.email == user_data.email))
+    if existing:
+        return {"detail": "Email already registered"}, 400
+    user = User(
+        id=uuid4().hex,
+        email=user_data.email,
+        hashed_password=hash_password(user_data.password),
+        role=user_data.role,
+    )
+    db.add(user)
     db.commit()
-    return {"status": "deleted"}
+    db.refresh(user)
+    return user
 
 
-@app.post("/api/conversations/{conversation_id}/messages")
-def send_message(
-    conversation_id: str,
-    req: MessageSendRequest,
+@app.post("/auth/login", response_model=TokenResponse)
+def login(credentials: UserLogin, db: Session = Depends(get_db)):
+    user = db.scalar(select(User).where(User.email == credentials.email))
+    if not user or not verify_password(credentials.password, user.hashed_password):
+        return {"detail": "Invalid email or password"}, 401
+    if not user.is_active:
+        return {"detail": "Account is deactivated"}, 403
+    token = create_access_token(user.id, user.role)
+    return TokenResponse(access_token=token, expires_in=86400)
+
+
+@app.get("/auth/me", response_model=UserResponse)
+def me(user: User = Depends(get_current_user)):
+    return user
+
+
+@app.post("/sessions", response_model=SessionCreateResponse)
+def create_session_endpoint(
     db: Session = Depends(get_db),
+    user: User = Depends(require_role("admin", "staff", "intern")),
 ):
-    """Asks inside an existing conversation, as a stream.
+    session = create_session(db, user.id)
+    return {"session_id": session.id, "expires_at": session.expires_at}
 
-    The conversation must already exist and belong to the calling client; a
-    message never creates one, so a stale id surfaces as a plain 404 rather than
-    silently starting a new conversation. The user message is recorded before
-    the stream opens and the assistant's answer when it finishes, so a stream
-    abandoned halfway records the question but no half-answer.
 
-    The events are a `status` saying the answer is being written, one `delta`
-    per piece of answer text, then a `done` carrying the finished answer and its
-    citations. After the very first exchange the stream also ends with a `title`
-    event naming the conversation, and that title replaces the placeholder.
-    """
-    conversation = owned_conversation_or_404(db, conversation_id, req.client_id)
-
-    was_empty = (
-        db.scalar(
-            select(Message).where(Message.conversation_id == conversation.id).limit(1)
-        )
-        is None
-    )
-
-    db.add(
-        Message(
-            id=uuid4().hex,
-            conversation_id=conversation.id,
-            role="user",
-            content=req.content,
-            sources=None,
-        )
-    )
+@app.post("/chat", response_model=ChatResponse)
+def chat(
+    req: ChatRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role("admin", "staff", "intern")),
+):
+    session = get_valid_session(db, req.session_id)
+    if session is None or session.user_id != user.id:
+        return {
+            "answer": "Session expired or invalid. Please create a new session.",
+            "answered": False,
+            "confidence": 0.0,
+            "sources": [],
+        }
+    result = state["assistant"].ask(req.question)
+    db.add(QA(session_id=req.session_id, user_id=user.id, question=req.question, **result))
     db.commit()
-
-    # Naming the conversation is a second model call, so it runs beside the answer
-    # rather than in front of it. Only the first exchange has one to do.
-    title_job = TitleJob(conversation.id, req.content).start() if was_empty else None
-
-    def events() -> Iterator[str]:
-        try:
-            for event in state["assistant"].ask_stream(req.content):
-                if event["type"] == "done":
-                    db.add(
-                        Message(
-                            id=uuid4().hex,
-                            conversation_id=conversation.id,
-                            role="assistant",
-                            content=event["answer"],
-                            sources=event["sources"] or None,
-                        )
-                    )
-                    touch(db, conversation)
-                    yield sse(event)
-
-                    if title_job is not None:
-                        title = title_job.title(wait_seconds=TITLE_WAIT_SECONDS)
-                        if title:
-                            yield sse({"type": "title", "title": title})
-                else:
-                    yield sse(event)
-        except LlmUnavailable as exc:
-            # The status line is already sent by the time the model fails, so the
-            # failure has to travel as an event rather than as a 503.
-            logger.error("streamed question not answered: %s", exc.reason)
-            yield sse({
-                "type": "error",
-                "detail": "The assistant is temporarily unavailable. Please try again.",
-            })
-
-    return StreamingResponse(
-        events(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            # Stops nginx and Render's proxy from holding the answer back until it
-            # is complete, which would make the stream arrive all at once.
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return result
 
 
-# How long a stream waits for the conversation's name before giving up on telling
-# the client about it. The answer has already been delivered by this point, and
-# the name is written to the database either way, so waiting too long would only
-# hold the connection open for a cosmetic event.
-TITLE_WAIT_SECONDS = 10
+@app.get("/history/{session_id}", response_model=list[HistoryItem])
+def history(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role("admin", "staff", "intern")),
+):
+    query = select(QA).where(QA.session_id == session_id)
+    if user.role != "admin":
+        query = query.where(QA.user_id == user.id)
+    return db.scalars(query.order_by(QA.created_at.desc())).all()
 
 
-class TitleJob:
-    """Names a brand new conversation on its own thread.
-
-    Naming the conversation cannot be part of the request's own work: it is a
-    second model call, and running it inline would either delay the answer the
-    reader is watching or, if it were left until after the last event, be thrown
-    away by a client that hangs up first. On a thread it costs the answer
-    nothing, and the name is stored whether or not anyone is still listening.
-    """
-
-    def __init__(self, conversation_id: str, first_message: str) -> None:
-        self._conversation_id = conversation_id
-        self._first_message = first_message
-        self._title: str | None = None
-        self._finished = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="title", daemon=True)
-
-    def start(self) -> "TitleJob":
-        self._thread.start()
-        return self
-
-    def title(self, wait_seconds: float = 0) -> str | None:
-        """The generated title, waiting up to `wait_seconds` for it."""
-        if not self._finished.wait(timeout=wait_seconds):
-            return None
-        return self._title
-
-    def _run(self) -> None:
-        try:
-            title = state["assistant"].generate_title(self._first_message)
-            if title:
-                self._title = title
-                self._store(title)
-        except Exception:
-            # The answer is already delivered and recorded; a conversation that
-            # cannot be named is left untitled rather than failing anything.
-            logger.exception("could not name conversation %s", self._conversation_id)
-        finally:
-            self._finished.set()
-
-    def _store(self, title: str) -> None:
-        # Its own session: the request's is closed once the response is sent, and
-        # this thread outlives it.
-        db = open_db()
-        try:
-            conversation = db.get(Conversation, self._conversation_id)
-            if conversation is None:
-                return
-            # Someone renaming the conversation while the title was being written
-            # wins: their name is the one they chose.
-            if conversation.title is None:
-                conversation.title = title
-                conversation.updated_at = datetime.now(timezone.utc)
-                db.commit()
-        except Exception:
-            logger.exception("could not store the title for %s", self._conversation_id)
-        finally:
-            db.close()
+@app.get("/admin/users", response_model=list[UserResponse])
+def list_users(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role("admin")),
+):
+    return db.scalars(select(User)).all()
 
 
-def sse(event: dict) -> str:
-    """One server-sent event. A JSON payload, so no framing is needed in it."""
-    return f"data: {json.dumps(event)}\n\n"
+@app.patch("/admin/users/{user_id}/role", response_model=UserResponse)
+def update_user_role(
+    user_id: str,
+    role_data: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role("admin")),
+):
+    target = db.get(User, user_id)
+    if not target:
+        return {"detail": "User not found"}, 404
+    new_role = role_data.get("role")
+    if new_role not in ("admin", "staff", "intern"):
+        return {"detail": "Invalid role"}, 400
+    target.role = new_role
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+@app.delete("/admin/users/{user_id}")
+def deactivate_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role("admin")),
+):
+    target = db.get(User, user_id)
+    if not target:
+        return {"detail": "User not found"}, 404
+    target.is_active = False
+    db.commit()
+    return {"detail": "User deactivated"}

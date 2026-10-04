@@ -4,6 +4,10 @@ pydantic-settings
 sqlalchemy
 psycopg[binary]
 psycopg2-binary
-openai
 llama-index-core
-llama-index-embeddings-nvidia
+llama-index-embeddings-google-genai
+llama-index-llms-google-genai
+pyjwt
+bcrypt
+python-multipart
+email-validator
