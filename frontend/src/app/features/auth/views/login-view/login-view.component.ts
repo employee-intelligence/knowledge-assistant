@@ -1,9 +1,11 @@
-import { Component, inject, signal } from '@angular/core';
-import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
-import { Router } from '@angular/router';
+import { Component, inject, signal, computed } from '@angular/core';
+import { FormBuilder, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
+import { Router, ActivatedRoute } from '@angular/router';
 
 import { AuthService } from '../../../../core/services/auth.service';
 import { ApiError } from '../../../../core/services/api.service';
+
+const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
 
 @Component({
   selector: 'app-login-view',
@@ -28,8 +30,8 @@ import { ApiError } from '../../../../core/services/api.service';
               placeholder="you@company.com"
               autocomplete="email"
             />
-            @if (form.get('email')?.invalid && form.get('email')?.touched) {
-              <p class="mt-1 text-sm text-destructive">Please enter a valid email address</p>
+            @if (emailError()) {
+              <p class="mt-1 text-sm text-destructive">{{ emailError() }}</p>
             }
           </div>
 
@@ -43,23 +45,27 @@ import { ApiError } from '../../../../core/services/api.service';
               placeholder="••••••••"
               autocomplete="current-password"
             />
-            @if (form.get('password')?.invalid && form.get('password')?.touched) {
-              <p class="mt-1 text-sm text-destructive">Password is required</p>
+            @if (passwordError()) {
+              <p class="mt-1 text-sm text-destructive">{{ passwordError() }}</p>
             }
           </div>
 
-          @if (error()) {
-            <div class="rounded-md bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
-              {{ error() }}
-            </div>
-          }
+          <label class="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              class="size-3.5 cursor-pointer accent-primary"
+              [checked]="rememberMe()"
+              (change)="onRememberMe($event)"
+            />
+            <span>Remember me</span>
+          </label>
 
           <button
             type="submit"
-            [disabled]="form.invalid || isLoading()"
+            [disabled]="isSubmitting()"
             class="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            @if (isLoading()) {
+            @if (isSubmitting()) {
               <span class="flex items-center justify-center gap-2">
                 <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24">
                   <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none" />
@@ -73,6 +79,18 @@ import { ApiError } from '../../../../core/services/api.service';
           </button>
         </form>
 
+        @if (notice()) {
+          <p
+            class="mt-4 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            role="alert"
+          >
+            <svg class="mt-0.5 shrink-0 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <span>{{ notice() }}</span>
+          </p>
+        }
+
         <p class="mt-6 text-center text-sm text-muted-foreground">
           Don't have an account?
           <a routerLink="/register" class="text-primary hover:underline ml-1">Register</a>
@@ -84,37 +102,106 @@ import { ApiError } from '../../../../core/services/api.service';
 export class LoginViewComponent {
   private readonly auth = inject(AuthService);
   private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
+  private readonly formBuilder = inject(FormBuilder);
 
-  protected readonly isLoading = signal(false);
-  protected readonly error = signal<string | null>(null);
-
-  protected readonly form = new FormGroup({
-    email: new FormControl('', { nonNullable: true, validators: [Validators.required, Validators.email] }),
-    password: new FormControl('', { nonNullable: true, validators: [Validators.required, Validators.minLength(1)] }),
+  protected readonly form = this.formBuilder.nonNullable.group({
+    email: ['', [Validators.required, Validators.email]],
+    password: ['', [Validators.required]],
   });
 
+  protected readonly rememberMe = signal(false);
+  private readonly submitted = signal(false);
+  protected readonly isSubmitting = signal(false);
+  protected readonly notice = signal('');
+
+  protected readonly emailError = computed(() => {
+    if (!this.submitted()) {
+      return '';
+    }
+    const control = this.form.controls.email;
+    if (control.hasError('required')) {
+      return 'Enter your email';
+    }
+    if (control.hasError('email')) {
+      return 'That does not look like an email address';
+    }
+    return '';
+  });
+
+  protected readonly passwordError = computed(() => {
+    if (!this.submitted()) {
+      return '';
+    }
+    return this.form.controls.password.hasError('required') ? 'Enter your password' : '';
+  });
+
+  constructor() {
+    try {
+      const remembered = localStorage.getItem(REMEMBERED_EMAIL_KEY);
+      if (remembered && remembered.includes('@')) {
+        this.form.controls.email.setValue(remembered);
+        this.rememberMe.set(true);
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  protected onRememberMe(event: Event): void {
+    this.rememberMe.set((event.target as HTMLInputElement).checked);
+    try {
+      if (this.rememberMe()) {
+        localStorage.setItem(REMEMBERED_EMAIL_KEY, this.form.controls.email.value.trim());
+      } else {
+        localStorage.removeItem(REMEMBERED_EMAIL_KEY);
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
   protected onSubmit(): void {
-    if (this.form.invalid) {
-      this.form.markAllAsTouched();
+    this.submitted.set(true);
+    this.notice.set('');
+
+    if (this.emailError() || this.passwordError() || this.form.invalid) {
       return;
     }
 
-    this.isLoading.set(true);
-    this.error.set(null);
+    this.isSubmitting.set(true);
 
     const { email, password } = this.form.getRawValue();
 
     this.auth.login(email, password).subscribe({
-      next: (user) => {
-        this.isLoading.set(false);
-        const returnUrl = this.router.parseUrl(this.router.url).queryParams['returnUrl'] ?? this.auth.landingPath();
+      next: () => {
+        this.isSubmitting.set(false);
+        const returnUrl = this.route.snapshot.queryParamMap.get('returnUrl') ?? this.auth.landingPath();
         this.router.navigateByUrl(returnUrl);
       },
-      error: (err: unknown) => {
-        this.isLoading.set(false);
-        const apiError = err instanceof ApiError ? err : new ApiError('Sign in failed', 0, true);
-        this.error.set(apiError.message);
+      error: (error: unknown) => {
+        this.isSubmitting.set(false);
+        this.notice.set(this.readSignInFailure(error));
       },
     });
+  }
+
+  private returnUrl(): string {
+    const requested = this.route.snapshot.queryParamMap.get('returnUrl');
+    if (requested && requested.startsWith('/') && !requested.startsWith('//')) {
+      return requested;
+    }
+    return this.auth.landingPath();
+  }
+
+  private readSignInFailure(error: unknown): string {
+    if (error instanceof ApiError) {
+      return error.message;
+    }
+    const status = (error as { status?: number } | null)?.status;
+    if (status === 0) {
+      return 'Could not reach the server. Please check your connection and try again.';
+    }
+    return 'Sign in failed. Please try again.';
   }
 }

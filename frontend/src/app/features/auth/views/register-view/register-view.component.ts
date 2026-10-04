@@ -1,5 +1,5 @@
-import { Component, inject, signal } from '@angular/core';
-import { AbstractControl, FormControl, FormGroup, ReactiveFormsModule, ValidationErrors, Validators } from '@angular/forms';
+import { Component, inject, signal, computed } from '@angular/core';
+import { AbstractControl, FormBuilder, FormGroup, ReactiveFormsModule, ValidationErrors, Validators } from '@angular/forms';
 import { Router } from '@angular/router';
 
 import { AuthService } from '../../../../core/services/auth.service';
@@ -34,8 +34,8 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
               placeholder="John Doe"
               autocomplete="name"
             />
-            @if (form.get('name')?.invalid && form.get('name')?.touched) {
-              <p class="mt-1 text-sm text-destructive">Name is required</p>
+            @if (nameError()) {
+              <p class="mt-1 text-sm text-destructive">{{ nameError() }}</p>
             }
           </div>
 
@@ -49,8 +49,8 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
               placeholder="you@company.com"
               autocomplete="email"
             />
-            @if (form.get('email')?.invalid && form.get('email')?.touched) {
-              <p class="mt-1 text-sm text-destructive">Please enter a valid email address</p>
+            @if (emailError()) {
+              <p class="mt-1 text-sm text-destructive">{{ emailError() }}</p>
             }
           </div>
 
@@ -64,8 +64,8 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
               placeholder="••••••••"
               autocomplete="new-password"
             />
-            @if (form.get('password')?.invalid && form.get('password')?.touched) {
-              <p class="mt-1 text-sm text-destructive">Password must be at least 8 characters</p>
+            @if (passwordError()) {
+              <p class="mt-1 text-sm text-destructive">{{ passwordError() }}</p>
             }
           </div>
 
@@ -79,26 +79,17 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
               placeholder="••••••••"
               autocomplete="new-password"
             />
-            @if (form.get('confirmPassword')?.invalid && form.get('confirmPassword')?.touched) {
-              <p class="mt-1 text-sm text-destructive">Please confirm your password</p>
-            }
-            @if (form.hasError('passwordMismatch') && form.get('confirmPassword')?.touched) {
-              <p class="mt-1 text-sm text-destructive">Passwords do not match</p>
+            @if (confirmPasswordError()) {
+              <p class="mt-1 text-sm text-destructive">{{ confirmPasswordError() }}</p>
             }
           </div>
 
-          @if (error()) {
-            <div class="rounded-md bg-destructive/10 border border-destructive/20 p-3 text-sm text-destructive">
-              {{ error() }}
-            </div>
-          }
-
           <button
             type="submit"
-            [disabled]="form.invalid || isLoading()"
+            [disabled]="isSubmitting()"
             class="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            @if (isLoading()) {
+            @if (isSubmitting()) {
               <span class="flex items-center justify-center gap-2">
                 <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24">
                   <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none" />
@@ -112,6 +103,18 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
           </button>
         </form>
 
+        @if (notice()) {
+          <p
+            class="mt-4 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            role="alert"
+          >
+            <svg class="mt-0.5 shrink-0 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <span>{{ notice() }}</span>
+          </p>
+        }
+
         <p class="mt-6 text-center text-sm text-muted-foreground">
           Already have an account?
           <a routerLink="/login" class="text-primary hover:underline ml-1">Sign in</a>
@@ -123,38 +126,81 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
 export class RegisterViewComponent {
   private readonly auth = inject(AuthService);
   private readonly router = inject(Router);
+  private readonly formBuilder = inject(FormBuilder);
 
-  protected readonly isLoading = signal(false);
-  protected readonly error = signal<string | null>(null);
-
-  protected readonly form = new FormGroup({
-    name: new FormControl('', { nonNullable: true, validators: [Validators.required, Validators.minLength(1)] }),
-    email: new FormControl('', { nonNullable: true, validators: [Validators.required, Validators.email] }),
-    password: new FormControl('', { nonNullable: true, validators: [Validators.required, Validators.minLength(8)] }),
-    confirmPassword: new FormControl('', { nonNullable: true, validators: [Validators.required] }),
+  protected readonly form = this.formBuilder.nonNullable.group({
+    name: ['', [Validators.required, Validators.minLength(1)]],
+    email: ['', [Validators.required, Validators.email]],
+    password: ['', [Validators.required, Validators.minLength(8)]],
+    confirmPassword: ['', [Validators.required]],
   }, { validators: passwordsMatchValidator });
 
+  protected readonly isSubmitting = signal(false);
+  protected readonly notice = signal('');
+  private readonly submitted = signal(false);
+
+  protected readonly nameError = computed(() => {
+    if (!this.submitted()) return '';
+    const control = this.form.controls.name;
+    return control.hasError('required') ? 'Enter your name' : '';
+  });
+
+  protected readonly emailError = computed(() => {
+    if (!this.submitted()) return '';
+    const control = this.form.controls.email;
+    if (control.hasError('required')) return 'Enter your email';
+    if (control.hasError('email')) return 'That does not look like an email address';
+    return '';
+  });
+
+  protected readonly passwordError = computed(() => {
+    if (!this.submitted()) return '';
+    const control = this.form.controls.password;
+    if (control.hasError('required')) return 'Enter your password';
+    if (control.hasError('minlength')) return 'Password must be at least 8 characters';
+    return '';
+  });
+
+  protected readonly confirmPasswordError = computed(() => {
+    if (!this.submitted()) return '';
+    const control = this.form.controls.confirmPassword;
+    if (control.hasError('required')) return 'Please confirm your password';
+    if (this.form.hasError('passwordMismatch')) return 'Passwords do not match';
+    return '';
+  });
+
   protected onSubmit(): void {
-    if (this.form.invalid) {
-      this.form.markAllAsTouched();
+    this.submitted.set(true);
+    this.notice.set('');
+
+    if (this.nameError() || this.emailError() || this.passwordError() || this.confirmPasswordError() || this.form.invalid) {
       return;
     }
 
-    this.isLoading.set(true);
-    this.error.set(null);
+    this.isSubmitting.set(true);
 
     const { name, email, password } = this.form.getRawValue();
 
     this.auth.register(name, email, password).subscribe({
-      next: (user) => {
-        this.isLoading.set(false);
+      next: () => {
+        this.isSubmitting.set(false);
         this.router.navigateByUrl(this.auth.landingPath());
       },
-      error: (err: unknown) => {
-        this.isLoading.set(false);
-        const apiError = err instanceof ApiError ? err : new ApiError('Registration failed', 0, true);
-        this.error.set(apiError.message);
+      error: (error: unknown) => {
+        this.isSubmitting.set(false);
+        this.notice.set(this.readRegisterFailure(error));
       },
     });
+  }
+
+  private readRegisterFailure(error: unknown): string {
+    if (error instanceof ApiError) {
+      return error.message;
+    }
+    const status = (error as { status?: number } | null)?.status;
+    if (status === 0) {
+      return 'Could not reach the server. Please check your connection and try again.';
+    }
+    return 'Registration failed. Please try again.';
   }
 }
