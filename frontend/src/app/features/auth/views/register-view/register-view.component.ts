@@ -23,7 +23,7 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
           <p class="mt-2 text-muted-foreground">Enter your details to get started</p>
         </div>
 
-        <form [formGroup]="form" (ngSubmit)="onSubmit()" class="space-y-4">
+        <form [formGroup]="form" (ngSubmit)="onSubmit()" class="space-y-4 rounded-lg border border-input bg-card p-6">
           <div>
             <label for="name" class="block text-sm font-medium text-foreground mb-1">Full name</label>
             <input

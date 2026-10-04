@@ -17,7 +17,7 @@ import { ApiError } from '../../../../core/services/api.service';
           <p class="mt-2 text-muted-foreground">Enter your credentials to access your account</p>
         </div>
 
-        <form [formGroup]="form" (ngSubmit)="onSubmit()" class="space-y-4">
+        <form [formGroup]="form" (ngSubmit)="onSubmit()" class="space-y-4 rounded-lg border border-input bg-card p-6">
           <div>
             <label for="email" class="block text-sm font-medium text-foreground mb-1">Email</label>
             <input
