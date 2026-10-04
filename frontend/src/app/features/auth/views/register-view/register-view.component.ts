@@ -4,6 +4,7 @@ import { Router } from '@angular/router';
 
 import { AuthService } from '../../../../core/services/auth.service';
 import { ApiError } from '../../../../core/services/api.service';
+import { ToastService } from '../../../../core/services/toast.service';
 
 function passwordsMatchValidator(control: AbstractControl): ValidationErrors | null {
   const password = control.get('password')?.value;
@@ -103,18 +104,6 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
           </button>
         </form>
 
-        @if (notice()) {
-          <p
-            class="mt-4 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive"
-            role="alert"
-          >
-            <svg class="mt-0.5 shrink-0 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-            <span>{{ notice() }}</span>
-          </p>
-        }
-
         <p class="mt-6 text-center text-sm text-muted-foreground">
           Already have an account?
           <a routerLink="/login" class="text-primary hover:underline ml-1">Sign in</a>
@@ -127,6 +116,7 @@ export class RegisterViewComponent {
   private readonly auth = inject(AuthService);
   private readonly router = inject(Router);
   private readonly formBuilder = inject(FormBuilder);
+  private readonly toast = inject(ToastService);
 
   protected readonly form = this.formBuilder.nonNullable.group({
     name: ['', [Validators.required, Validators.minLength(1)]],
@@ -136,7 +126,6 @@ export class RegisterViewComponent {
   }, { validators: passwordsMatchValidator });
 
   protected readonly isSubmitting = signal(false);
-  protected readonly notice = signal('');
   private readonly submitted = signal(false);
 
   protected readonly nameError = computed(() => {
@@ -171,7 +160,6 @@ export class RegisterViewComponent {
 
   protected onSubmit(): void {
     this.submitted.set(true);
-    this.notice.set('');
 
     if (this.nameError() || this.emailError() || this.passwordError() || this.confirmPasswordError() || this.form.invalid) {
       return;
@@ -184,11 +172,12 @@ export class RegisterViewComponent {
     this.auth.register(name, email, password).subscribe({
       next: () => {
         this.isSubmitting.set(false);
+        this.toast.success('Account created successfully');
         this.router.navigateByUrl(this.auth.landingPath());
       },
       error: (error: unknown) => {
         this.isSubmitting.set(false);
-        this.notice.set(this.readRegisterFailure(error));
+        this.toast.error(this.readRegisterFailure(error));
       },
     });
   }

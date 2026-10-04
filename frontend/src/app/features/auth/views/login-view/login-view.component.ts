@@ -4,6 +4,7 @@ import { Router, ActivatedRoute } from '@angular/router';
 
 import { AuthService } from '../../../../core/services/auth.service';
 import { ApiError } from '../../../../core/services/api.service';
+import { ToastService } from '../../../../core/services/toast.service';
 
 const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
 
@@ -79,18 +80,6 @@ const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
           </button>
         </form>
 
-        @if (notice()) {
-          <p
-            class="mt-4 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive"
-            role="alert"
-          >
-            <svg class="mt-0.5 shrink-0 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-            <span>{{ notice() }}</span>
-          </p>
-        }
-
         <p class="mt-6 text-center text-sm text-muted-foreground">
           Don't have an account?
           <a routerLink="/register" class="text-primary hover:underline ml-1">Register</a>
@@ -104,6 +93,7 @@ export class LoginViewComponent {
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
   private readonly formBuilder = inject(FormBuilder);
+  private readonly toast = inject(ToastService);
 
   protected readonly form = this.formBuilder.nonNullable.group({
     email: ['', [Validators.required, Validators.email]],
@@ -113,7 +103,6 @@ export class LoginViewComponent {
   protected readonly rememberMe = signal(false);
   private readonly submitted = signal(false);
   protected readonly isSubmitting = signal(false);
-  protected readonly notice = signal('');
 
   protected readonly emailError = computed(() => {
     if (!this.submitted()) {
@@ -163,7 +152,6 @@ export class LoginViewComponent {
 
   protected onSubmit(): void {
     this.submitted.set(true);
-    this.notice.set('');
 
     if (this.emailError() || this.passwordError() || this.form.invalid) {
       return;
@@ -176,12 +164,13 @@ export class LoginViewComponent {
     this.auth.login(email, password).subscribe({
       next: () => {
         this.isSubmitting.set(false);
+        this.toast.success('Signed in successfully');
         const returnUrl = this.route.snapshot.queryParamMap.get('returnUrl') ?? this.auth.landingPath();
         this.router.navigateByUrl(returnUrl);
       },
       error: (error: unknown) => {
         this.isSubmitting.set(false);
-        this.notice.set(this.readSignInFailure(error));
+        this.toast.error(this.readSignInFailure(error));
       },
     });
   }

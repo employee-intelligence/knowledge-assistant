@@ -5,10 +5,12 @@ import {
 } from '@angular/core';
 import { RouterOutlet } from '@angular/router';
 
+import { ToastComponent } from './shared/components/toast/toast.component';
+
 @Component({
   selector: 'app-root',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [RouterOutlet],
+  imports: [RouterOutlet, ToastComponent],
   template: `
     <a
       href="#app-main"
@@ -22,6 +24,7 @@ import { RouterOutlet } from '@angular/router';
     <main id="app-main" class="flex min-h-dvh flex-col bg-background">
       <router-outlet />
     </main>
+    <app-toast />
   `,
 })
 export class AppComponent {
