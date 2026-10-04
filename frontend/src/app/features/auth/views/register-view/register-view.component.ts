@@ -102,12 +102,12 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
               Create account
             }
           </button>
-        </form>
 
-        <p class="mt-6 text-center text-sm text-muted-foreground">
-          Already have an account?
-          <a routerLink="/login" class="text-primary hover:underline ml-1">Sign in</a>
-        </p>
+          <p class="mt-4 text-center text-sm text-muted-foreground">
+            Already have an account?
+            <a routerLink="/login" class="text-primary hover:underline ml-1">Sign in</a>
+          </p>
+        </form>
       </div>
     </div>
   `,

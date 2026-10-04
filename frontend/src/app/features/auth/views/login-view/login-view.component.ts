@@ -78,12 +78,12 @@ const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
               Sign in
             }
           </button>
-        </form>
 
-        <p class="mt-6 text-center text-sm text-muted-foreground">
-          Don't have an account?
-          <a routerLink="/register" class="text-primary hover:underline ml-1">Register</a>
-        </p>
+          <p class="mt-4 text-center text-sm text-muted-foreground">
+            Don't have an account?
+            <a routerLink="/register" class="text-primary hover:underline ml-1">Register</a>
+          </p>
+        </form>
       </div>
     </div>
   `,
