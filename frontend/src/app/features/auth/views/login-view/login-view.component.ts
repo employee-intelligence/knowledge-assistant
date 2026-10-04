@@ -12,12 +12,12 @@ import { ApiError } from '../../../../core/services/api.service';
   template: `
     <div class="flex min-h-dvh items-center justify-center bg-background px-4">
       <div class="w-full max-w-md">
-        <div class="text-center mb-8">
-          <h1 class="text-3xl font-bold text-foreground">Sign in</h1>
-          <p class="mt-2 text-muted-foreground">Enter your credentials to access your account</p>
-        </div>
+        <form [formGroup]="form" (ngSubmit)="onSubmit()" class="space-y-4 rounded-lg border border-input bg-card p-6 shadow-xl">
+          <div class="text-center mb-6">
+            <h1 class="text-2xl font-bold text-foreground">Sign in</h1>
+            <p class="mt-1 text-sm text-muted-foreground">Enter your credentials to access your account</p>
+          </div>
 
-        <form [formGroup]="form" (ngSubmit)="onSubmit()" class="space-y-4 rounded-lg border border-input bg-card p-6">
           <div>
             <label for="email" class="block text-sm font-medium text-foreground mb-1">Email</label>
             <input
