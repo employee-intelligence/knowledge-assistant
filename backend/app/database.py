@@ -291,3 +291,102 @@ def revoke_family(db: SessionLocal, family_id: str) -> int:
 
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    _ensure_missing_columns()
+    _ensure_missing_indexes()
+
+
+def _ensure_missing_columns() -> None:
+    """Adds columns that `create_all` cannot.
+
+    `create_all` only creates tables that do not exist yet; it never alters a
+    table that is already there. The deployed database was created before the
+    auth tables (and the `name` column on `users`) existed, so a deploy that
+    only calls `create_all` leaves a stale `users` table behind and every
+    sign-in fails with `UndefinedColumn: column users.name does not exist`.
+
+    This walks every mapped table, compares the model's columns against the
+    ones the database actually has, and adds whatever is missing with a plain
+    `ADD COLUMN`. Columns are added nullable (no `NOT NULL` constraint) even
+    when the model declares them required, because adding a `NOT NULL` column
+    without a default to a non-empty table fails on PostgreSQL — and a stale
+    row with a `NULL` there is a data problem, not a reason to refuse startup.
+    Idempotent: a column that already exists is skipped. The `try/except`
+    around the `ALTER` covers the race where two workers start at once and
+    both see the column as missing — the loser treats "already exists" as
+    success rather than crashing startup.
+    """
+    import logging
+
+    from sqlalchemy import inspect, text
+    from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
+
+    logger = logging.getLogger(__name__)
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    for table in Base.metadata.tables.values():
+        if table.name not in existing_tables:
+            continue  # `create_all` just created it with the full shape.
+        existing_columns = {
+            column["name"] for column in inspector.get_columns(table.name)
+        }
+        for column in table.columns:
+            if column.name in existing_columns:
+                continue
+            column_type = column.type.compile(dialect=engine.dialect)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            f'ALTER TABLE "{table.name}" '
+                            f'ADD COLUMN "{column.name}" {column_type}'
+                        )
+                    )
+            except (OperationalError, ProgrammingError, DBAPIError) as exc:
+                # Re-read: if the column is there now, another worker won the
+                # race — that is success. Anything else is re-raised.
+                refreshed = {
+                    c["name"]
+                    for c in inspect(engine).get_columns(table.name)
+                }
+                if column.name in refreshed:
+                    continue
+                raise RuntimeError(
+                    f"could not add missing column "
+                    f"{table.name}.{column.name}: {exc}"
+                ) from exc
+            logger.warning(
+                "migrated table %s: added missing column %s",
+                table.name,
+                column.name,
+            )
+
+
+def _ensure_missing_indexes() -> None:
+    """Creates indexes that `create_all` skipped on pre-existing tables.
+
+    Like columns, an index on a table that already existed is never created by
+    `create_all` — the table is left exactly as it was. A missing index cannot
+    cause a 500 (the query still runs, just slower), but a missing index on a
+    hot lookup (`users.email`, `refresh_sessions.family_id`,
+    `conversations.client_id`, …) turns every sign-in into a full table scan,
+    so they are created here. `IF NOT EXISTS` makes this idempotent and safe
+    under concurrent startup on both PostgreSQL and SQLite.
+    """
+    import logging
+
+    from sqlalchemy import text
+
+    logger = logging.getLogger(__name__)
+    for table in Base.metadata.tables.values():
+        for index in table.indexes:
+            # `index.name` is always set: SQLAlchemy generates one
+            # (`ix_<table>_<column>`) for every `index=True` column.
+            column_list = ", ".join(f'"{c.name}"' for c in index.columns)
+            statement = (
+                f'CREATE INDEX IF NOT EXISTS "{index.name}" '
+                f'ON "{table.name}" ({column_list})'
+            )
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+                logger.debug("ensured index %s", index.name)
