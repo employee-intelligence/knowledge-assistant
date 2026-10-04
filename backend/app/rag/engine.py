@@ -21,6 +21,21 @@ PERSONAL_MSG = (
     "self-service portal on the intranet, or contact HR at hr@acmetech.example."
 )
 
+TITLE_MAX_TOKENS = 64
+
+
+def truncate_title(title: str) -> str:
+    """Truncates a title to 50 characters at a word boundary."""
+    if len(title) <= 50:
+        return title
+    truncated = title[:50]
+    # Find the last space to avoid cutting a word in half
+    last_space = truncated.rfind(' ')
+    if last_space > 0:
+        truncated = truncated[:last_space]
+    return truncated.rstrip(' .,;:')
+
+
 PROMPT = """You are the Internal Knowledge Assistant for Acme Technologies.
 Answer the question using ONLY the context below. Be concise, and use numbered
 steps when the source describes a process.
@@ -53,6 +68,7 @@ class LlmUnavailable(Exception):
 class Assistant:
     def __init__(self, index: VectorStoreIndex):
         self.retriever = index.as_retriever(similarity_top_k=settings.top_k)
+        self._client: GoogleGenAI | None = None
 
     def _complete(self, prompt: str) -> tuple[str, str]:
         """Answer via the first model in the chain that works, with retries.
@@ -134,3 +150,33 @@ class Assistant:
         ]
         confidence = round(sum(float(n.score or 0) for n in nodes) / len(nodes), 3)
         return {"answer": text, "answered": True, "confidence": confidence, "sources": sources}
+
+    def generate_title(self, question: str) -> str:
+        """Generates a short title for a conversation from its first question."""
+        if not self._client:
+            return truncate_title(question)
+
+        title_prompt = (
+            "Generate a short, descriptive title (max 50 chars) for a conversation "
+            "starting with this question. No quotes, no punctuation at the end.\n\n"
+            f"Question: {question}\nTitle:"
+        )
+        try:
+            # Try the llama_index GoogleGenAI interface first
+            if hasattr(self._client, 'complete'):
+                response = self._client.complete(title_prompt)
+                title = response.text.strip().strip('"\'')
+                return truncate_title(title)
+            # Fallback to OpenAI-compatible interface (used in tests)
+            elif hasattr(self._client, 'chat') and hasattr(self._client.chat, 'completions'):
+                response = self._client.chat.completions.create(
+                    model="title-generator",
+                    messages=[{"role": "user", "content": title_prompt}],
+                    max_tokens=TITLE_MAX_TOKENS,
+                )
+                title = response.choices[0].message.content.strip().strip('"\'').rstrip('.')
+                return truncate_title(title)
+            else:
+                return truncate_title(question)
+        except Exception:
+            return truncate_title(question)

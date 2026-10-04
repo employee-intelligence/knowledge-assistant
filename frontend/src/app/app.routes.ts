@@ -1,53 +1,79 @@
 import { Routes } from '@angular/router';
 
-/**
- * Each view is lazily loaded, so the initial bundle only carries the shell.
- * The response view still reads `:id` itself rather than taking a bound input,
- * so it stays in charge of what an unknown id means.
- *
- * `response/:id` addresses one conversation by its own id, which never changes,
- * so the link keeps working however long afterwards it is followed. The bare
- * `response` route follows the conversation that was last active, which is where
- * a question sent from the dashboard lands.
- */
+import { authGuard, adminGuard, guestGuard } from './core/guards/auth.guard';
+
 export const routes: Routes = [
   {
     path: '',
     pathMatch: 'full',
     title: 'Internal Knowledge Assistant',
+    canActivate: [authGuard],
     loadComponent: () =>
       import('./views/dashboard-view/dashboard-view.component').then(
         (module) => module.DashboardViewComponent,
       ),
   },
   {
-    path: 'ask',
+    path: 'chat/:sessionId',
+    title: 'Chat · Internal Knowledge Assistant',
+    canActivate: [authGuard],
+    loadComponent: () =>
+      import('./views/chat-view/chat-view.component').then(
+        (module) => module.ChatViewComponent,
+      ),
+  },
+  {
+    path: 'chat',
     pathMatch: 'full',
-    title: 'Ask a question · Internal Knowledge Assistant',
-    redirectTo: '',
-  },
-  {
-    path: 'response',
-    title: 'Answer · Internal Knowledge Assistant',
+    title: 'New Chat · Internal Knowledge Assistant',
+    canActivate: [authGuard],
     loadComponent: () =>
-      import('./views/response-view/response-view.component').then(
-        (module) => module.ResponseViewComponent,
+      import('./views/chat-view/chat-view.component').then(
+        (module) => module.ChatViewComponent,
       ),
   },
   {
-    path: 'response/:id',
-    title: 'Answer · Internal Knowledge Assistant',
+    path: 'sessions',
+    title: 'Sessions · Internal Knowledge Assistant',
+    canActivate: [authGuard],
     loadComponent: () =>
-      import('./views/response-view/response-view.component').then(
-        (module) => module.ResponseViewComponent,
+      import('./views/sessions-view/sessions-view.component').then(
+        (module) => module.SessionsViewComponent,
       ),
   },
   {
-    path: 'conversations',
-    title: 'Conversations · Internal Knowledge Assistant',
+    path: 'admin',
+    title: 'Admin · Internal Knowledge Assistant',
+    canActivate: [adminGuard],
     loadComponent: () =>
-      import('./views/conversations-view/conversations-view.component').then(
-        (module) => module.ConversationsViewComponent,
+      import('./views/admin-view/admin-view.component').then(
+        (module) => module.AdminViewComponent,
+      ),
+  },
+  {
+    path: 'login',
+    title: 'Sign in · Internal Knowledge Assistant',
+    canActivate: [guestGuard],
+    loadComponent: () =>
+      import('./features/auth/views/login-view/login-view.component').then(
+        (module) => module.LoginViewComponent,
+      ),
+  },
+  {
+    path: 'register',
+    title: 'Register · Internal Knowledge Assistant',
+    canActivate: [guestGuard],
+    loadComponent: () =>
+      import('./features/auth/views/register-view/register-view.component').then(
+        (module) => module.RegisterViewComponent,
+      ),
+  },
+  {
+    path: 'health',
+    title: 'Health Check · Internal Knowledge Assistant',
+    loadComponent: () =>
+      import('./views/health-view/health-view.component').then(
+        (module) => module.HealthViewComponent,
       ),
   },
   {

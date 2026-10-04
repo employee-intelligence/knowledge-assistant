@@ -4,25 +4,22 @@ import { Observable, catchError, map, throwError, timeout } from 'rxjs';
 
 import { API_BASE_URL, API_TIMEOUT_MS } from '../api.config';
 import {
-  ChatStreamEventDto,
-  ConversationCreateResponse,
-  ConversationDetailResponse,
-  ConversationListResponse,
-  ConversationSummaryDto,
-  MessageSendRequest,
-  SourceDto,
-  parseUtcTimestamp,
+  ChatRequestDto,
+  ChatResponseDto,
+  DocumentsDto,
+  HealthDto,
+  HistoryDto,
+  HistoryMessageDto,
+  SessionCreateResponse,
 } from '../models/api.model';
-import { Conversation, ConversationThread } from '../models/conversation.model';
-import { Message, SourceReference, countDocuments } from '../models/message.model';
+import { Message, Session, SessionThread, SourceReference, UNTITLED_SESSION } from '../models/session.model';
+import { AuthService, CSRF_HEADER } from './auth.service';
 
 /** An error from the backend, already reduced to something a view can show. */
 export class ApiError extends Error {
   constructor(
     override readonly message: string,
-    /** HTTP status, or 0 when the request never reached the backend. */
     readonly status: number,
-    /** True when retrying the same request could plausibly succeed. */
     readonly isTransient: boolean,
   ) {
     super(message);
@@ -31,243 +28,103 @@ export class ApiError extends Error {
 }
 
 /**
- * Shown when a stream ends without a `done` event.
- *
- * A connection dropped part way through has produced no answer at all, which is
- * different from an answer saying the corpus holds nothing, so it is reported as a
- * temporary failure and stays retryable.
- */
-export const STREAM_INCOMPLETE_MESSAGE =
-  'The connection to the assistant was interrupted before the answer finished. Please try again.';
-
-/**
  * The only place that talks to the backend. Components never inject
  * `HttpClient` themselves; they go through the feature services, which in turn
  * call this one.
- *
- * Two layers meet here. The methods return the backend's own wire types, so the
- * shape of the HTTP contract is readable in one place, and the mappers turn them
- * into the domain models the rest of the app uses. Backend changes land in a mapper
- * instead of rippling outward.
  */
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private readonly http = inject(HttpClient);
+  private readonly credentials = { withCredentials: true } as const;
+  private readonly auth = inject(AuthService);
 
-  /**
-   * `POST /api/conversations`. Opens a conversation for this client.
-   *
-   * Only ever called for a conversation the user asked to start. A message posted
-   * to an existing conversation appends to it, so asking a follow-up never lands
-   * the user in a new one.
-   */
-  createConversation(clientId: string): Observable<ConversationCreateResponse> {
-    return this.post<ConversationCreateResponse>('/api/conversations', { client_id: clientId });
+  /** `GET /health`. */
+  getHealth(): Observable<HealthDto> {
+    return this.get<HealthDto>('/health');
   }
 
-  /** `GET /api/conversations`. Every conversation this client owns, newest first. */
-  getConversations(clientId: string): Observable<Conversation[]> {
-    const path = `/api/conversations?client_id=${encodeURIComponent(clientId)}`;
-
-    return this.get<ConversationListResponse>(path).pipe(
-      map((response) => response.conversations.map((dto) => this.toConversation(dto))),
-    );
+  /** `GET /documents`. The titles in the indexed corpus. */
+  getDocuments(): Observable<DocumentsDto> {
+    return this.get<DocumentsDto>('/documents');
   }
 
-  /**
-   * `GET /api/conversations/{id}`. One conversation's whole thread, oldest first.
-   *
-   * Ordered oldest first by the backend, which is the order a conversation reads
-   * in, so it is used as it arrives.
-   */
-  getConversation(conversationId: string, clientId: string): Observable<ConversationThread> {
-    const path =
-      `/api/conversations/${encodeURIComponent(conversationId)}` +
-      `?client_id=${encodeURIComponent(clientId)}`;
-
-    return this.get<ConversationDetailResponse>(path).pipe(
-      map((response) => ({
-        id: response.id,
-        title: response.title,
-        messages: response.messages.map((dto) => this.toMessage(dto)),
-      })),
-    );
+  /** `POST /sessions`. Creates a new session. */
+  createSession(): Observable<SessionCreateResponse> {
+    return this.post<SessionCreateResponse>('/sessions', {});
   }
 
-  /** `POST /api/conversations/{id}/messages`. Asks, and emits the answer as written. */
-  sendMessage(
-    conversationId: string,
-    clientId: string,
-    content: string,
-  ): Observable<ChatStreamEventDto> {
-    return new Observable<ChatStreamEventDto>((subscriber) => {
-      const controller = new AbortController();
-      const body: MessageSendRequest = { client_id: clientId, content };
-      // Emitted from inside the read loop, so the caller sees each piece of the
-      // answer as it lands rather than when the stream ends.
-      const emit = (event: ChatStreamEventDto): void => {
-        if (!controller.signal.aborted) {
-          subscriber.next(event);
-        }
-      };
-
-      void this.readStream(conversationId, body, controller.signal, emit).then(
-        () => subscriber.complete(),
-        (error: unknown) => {
-          if (!controller.signal.aborted) {
-            subscriber.error(this.toApiError(error));
-          }
-        },
-      );
-
-      return () => controller.abort();
-    });
+  /** `POST /chat`. Sends a message and gets a response. */
+  chat(sessionId: string, message: string): Observable<ChatResponseDto> {
+    const body: ChatRequestDto = { session_id: sessionId, message };
+    return this.post<ChatResponseDto>('/chat', body);
   }
 
-  /** `PATCH /api/conversations/{id}`. Names a conversation. */
-  renameConversation(conversationId: string, clientId: string, title: string): Observable<void> {
-    const path = `/api/conversations/${encodeURIComponent(conversationId)}`;
-
-    return this.patch<void>(path, { client_id: clientId, title }).pipe(map(() => undefined));
+  /** `GET /history/{session_id}`. Gets the message history for a session. */
+  getHistory(sessionId: string): Observable<HistoryDto> {
+    return this.get<HistoryDto>(`/history/${encodeURIComponent(sessionId)}`);
   }
 
-  /** `DELETE /api/conversations/{id}`. Removes a conversation and its messages. */
-  deleteConversation(conversationId: string, clientId: string): Observable<void> {
-    const path =
-      `/api/conversations/${encodeURIComponent(conversationId)}` +
-      `?client_id=${encodeURIComponent(clientId)}`;
+  /** `GET /admin/users`. Lists all users (admin only). */
+  getUsers(): Observable<{ users: { id: string; name: string; email: string; role: string }[] }> {
+    return this.get<{ users: { id: string; name: string; email: string; role: string }[] }>('/admin/users');
+  }
 
-    return this.send(this.http.delete<void>(`${API_BASE_URL}${path}`)).pipe(map(() => undefined));
+  /** `PATCH /admin/users/{user_id}/role`. Updates a user's role (admin only). */
+  updateUserRole(userId: string, role: string): Observable<void> {
+    return this.patch<void>(`/admin/users/${encodeURIComponent(userId)}/role`, { role });
+  }
+
+  /** `DELETE /admin/users/{user_id}`. Deactivates a user (admin only). */
+  deactivateUser(userId: string): Observable<void> {
+    return this.delete<void>(`/admin/users/${encodeURIComponent(userId)}`);
   }
 
   /**
-   * Reads a `text/event-stream` body, handing each event to `onEvent` as it is
-   * parsed.
-   *
-   * Events are separated by a blank line and may arrive split across network
-   * chunks, so the buffer is only drained on a complete frame and whatever follows
-   * the last newline is kept for the next read.
+   * Converts a wire history DTO to domain session thread.
    */
-  private async readStream(
-    conversationId: string,
-    body: MessageSendRequest,
-    signal: AbortSignal,
-    onEvent: (event: ChatStreamEventDto) => void,
-  ): Promise<void> {
-    let response: Response;
-
-    try {
-      response = await fetch(
-        `${API_BASE_URL}/api/conversations/${encodeURIComponent(conversationId)}/messages`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal,
-        },
-      );
-    } catch {
-      // fetch reports a dropped connection and a refused request the same way,
-      // which is the status-0 case the rest of this service already describes.
-      throw new HttpErrorResponse({ status: 0, error: null });
-    }
-
-    if (!response.ok) {
-      throw new HttpErrorResponse({
-        status: response.status,
-        error: await this.readErrorBody(response),
-      });
-    }
-
-    if (!response.body) {
-      throw new HttpErrorResponse({ status: response.status, error: null });
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    for (;;) {
-      const { done, value } = await reader.read();
-
-      if (done) {
-        return;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      let boundary = buffer.indexOf('\n\n');
-
-      while (boundary !== -1) {
-        const event = this.parseFrame(buffer.slice(0, boundary));
-
-        if (event) {
-          onEvent(event);
-        }
-
-        buffer = buffer.slice(boundary + 2);
-        boundary = buffer.indexOf('\n\n');
-      }
-    }
+  toSessionThread(dto: HistoryDto): SessionThread {
+    return {
+      id: dto.session_id,
+      title: dto.messages.length > 0 ? this.generateTitle(dto.messages[0]) : null,
+      messages: dto.messages.map((m) => this.toMessage(m)),
+    };
   }
 
-  /**
-   * The JSON body of a failed response, or null when it is not JSON.
-   *
-   * A proxy in front of the backend can answer with HTML of its own, which is
-   * a status to report rather than a body to read.
-   */
-  private async readErrorBody(response: Response): Promise<unknown> {
-    try {
-      return await response.json();
-    } catch {
-      return null;
-    }
+  /** Converts a wire message to domain message. */
+  private toMessage(dto: HistoryMessageDto): Message {
+    return {
+      id: dto.id,
+      role: dto.role,
+      text: dto.content,
+      createdAt: dto.created_at,
+      status: 'answered',
+      sources: [],
+      documentCount: 0,
+    };
   }
 
-  /** One SSE frame as an event, or null for a frame that carries no payload. */
-  private parseFrame(frame: string): ChatStreamEventDto | null {
-    const payload = frame
-      .split('\n')
-      .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice(5).trim())
-      .join('');
-
-    if (!payload) {
-      return null;
-    }
-
-    try {
-      return JSON.parse(payload) as ChatStreamEventDto;
-    } catch {
-      // A frame that is not JSON is not something this client can act on, and
-      // dropping it keeps the rest of the stream usable.
-      return null;
-    }
+  /** Generates a title from the first message. */
+  private generateTitle(firstMessage: HistoryMessageDto): string {
+    const text = firstMessage.content.trim();
+    return text.length > 50 ? text.slice(0, 50) + '...' : text;
   }
 
-  /**
-   * A GET against a path, with the timeout and the error mapping applied.
-   *
-   * Paths are spelled out in full at every call site rather than being assembled
-   * from a base inside a shared helper. Handing each caller the bare base URL
-   * instead made it possible to send a request to the origin with no path at all,
-   * which is a request that cannot fail loudly.
-   */
   private get<T>(path: string): Observable<T> {
-    return this.send(this.http.get<T>(`${API_BASE_URL}${path}`));
+    return this.send(this.http.get<T>(`${API_BASE_URL}${path}`, this.credentials));
   }
 
-  /** A POST against a path, with the timeout and the error mapping applied. */
   private post<T>(path: string, body: unknown): Observable<T> {
-    return this.send(this.http.post<T>(`${API_BASE_URL}${path}`, body));
+    return this.send(this.http.post<T>(`${API_BASE_URL}${path}`, body, this.credentials));
   }
 
-  /** A PATCH against a path, with the timeout and the error mapping applied. */
   private patch<T>(path: string, body: unknown): Observable<T> {
-    return this.send(this.http.patch<T>(`${API_BASE_URL}${path}`, body));
+    return this.send(this.http.patch<T>(`${API_BASE_URL}${path}`, body, this.credentials));
   }
 
-  /** Applies the request timeout and flattens transport failures into `ApiError`. */
+  private delete<T>(path: string): Observable<T> {
+    return this.send(this.http.delete<T>(`${API_BASE_URL}${path}`, this.credentials));
+  }
+
   private send<T>(request: Observable<T>): Observable<T> {
     return request.pipe(
       timeout(API_TIMEOUT_MS),
@@ -275,69 +132,6 @@ export class ApiService {
     );
   }
 
-  /** A wire conversation as the domain shape. */
-  private toConversation(dto: ConversationSummaryDto): Conversation {
-    return {
-      id: dto.id,
-      title: dto.title,
-      updatedAt: parseUtcTimestamp(dto.updated_at),
-    };
-  }
-
-  /**
-   * A wire message as the domain shape.
-   *
-   * `sources` is null on a question, which cites nothing, so it becomes an empty
-   * list rather than a nullable field every consumer would have to check. The
-   * status is derived here rather than stored: a message that is in the backend is
-   * finished, and only a locally streamed one is still pending or has failed.
-   */
-  private toMessage(dto: {
-    id: string;
-    role: 'user' | 'assistant';
-    content: string;
-    sources: SourceDto[] | null;
-    created_at: string;
-  }): Message {
-    const sources = (dto.sources ?? []).map((source) => this.toSource(source));
-
-    return {
-      id: dto.id,
-      role: dto.role,
-      text: dto.content,
-      createdAt: parseUtcTimestamp(dto.created_at),
-      // A message in the backend has been delivered, so it is never pending and
-      // never failed. Those two states belong to an answer being streamed here, and
-      // a question carries no outcome at all.
-      status: 'answered',
-      sources,
-      documentCount: countDocuments(sources),
-    };
-  }
-
-  /** Turns a wire source into the domain shape. */
-  private toSource(dto: SourceDto): SourceReference {
-    return {
-      document: dto.document,
-      section: dto.section,
-      snippet: dto.snippet,
-      score: dto.score,
-    };
-  }
-
-  /**
-   * A failure worth showing a user.
-   *
-   * A browser reports a request the network dropped and a request the server
-   * answered without CORS headers identically, as a status of 0, so those are
-   * described together: from here they are the same thing and saying otherwise
-   * would be a distinction the page cannot actually make.
-   *
-   * A 422 means the message itself was rejected, so the backend's own wording is
-   * passed through; a 5xx means the answer may still be there and is worth
-   * retrying. A 404 means the conversation is not there to answer into, which is
-   * the one failure a retry cannot fix.
-   */
   private toApiError(error: unknown): ApiError {
     if (error instanceof HttpErrorResponse) {
       const detail = this.readValidationDetail(error.error);
@@ -346,9 +140,17 @@ export class ApiService {
         return new ApiError(detail, 422, false);
       }
 
+      if (error.status === 401) {
+        return new ApiError('Please sign in to continue.', 401, false);
+      }
+
+      if (error.status === 403) {
+        return new ApiError('You do not have permission to do that.', 403, false);
+      }
+
       if (error.status === 0) {
         return new ApiError(
-          'Could not get a response from the assistant. It may be temporarily unavailable.',
+          'Could not reach the server. It may be temporarily unavailable.',
           0,
           true,
         );
@@ -356,27 +158,26 @@ export class ApiService {
 
       if (error.status >= 500) {
         return new ApiError(
-          'The assistant is temporarily unavailable. Please try again.',
+          'The server is temporarily unavailable. Please try again.',
           error.status,
           true,
         );
       }
 
       if (error.status === 404) {
-        return new ApiError('That conversation is no longer available.', 404, false);
+        return new ApiError('Not found.', 404, false);
       }
 
-      return new ApiError('The request could not be completed.', error.status, false);
+      return new ApiError(detail ?? 'The request could not be completed.', error.status, false);
     }
 
     if (error instanceof Error && error.name === 'TimeoutError') {
-      return new ApiError('The assistant took too long to respond. Please try again.', 0, true);
+      return new ApiError('The request took too long. Please try again.', 0, true);
     }
 
     return new ApiError('Something went wrong. Please try again.', 0, true);
   }
 
-  /** The first human readable message out of a FastAPI 422 body, if there is one. */
   private readValidationDetail(body: unknown): string | null {
     if (typeof body !== 'object' || body === null || !('detail' in body)) {
       return null;
@@ -393,7 +194,6 @@ export class ApiService {
     }
 
     const first = (detail as { msg?: unknown }[])[0];
-
     return typeof first?.msg === 'string' ? first.msg : null;
   }
 }
