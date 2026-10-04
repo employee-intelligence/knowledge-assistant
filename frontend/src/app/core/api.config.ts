@@ -1,13 +1,14 @@
-// Local development backend. The backend runs from `backend/` with
-// `uvicorn app.main:app --host 127.0.0.1 --port 8099`, and its ALLOWED_ORIGINS
-// lists http://127.0.0.1:4200. Use 127.0.0.1 (not localhost) for cookies to work.
-export const API_BASE_URL = 'http://127.0.0.1:8099';
-
-// The deployed backend on Render. Both services are `*.onrender.com`, so they are
-// the same site and the `SameSite=Lax` session cookies are attached; the backend
-// reflects the origin because `ALLOWED_ORIGINS` is `*`, which is what makes a
-// credentialed cross-origin response acceptable to the browser.
-// export const API_BASE_URL = 'https://knowledge-assistant-backend-88gw.onrender.com';
+/**
+ * Single source for the backend origin. Every HTTP call is built from this,
+ * so pointing the app at a different deployment is a one-line change — and in
+ * practice it is not even that: `public/config.json` overrides it at runtime
+ * without a rebuild, and this is only the fallback when that file is missing.
+ *
+ * The deployed backend is https://knowledge-assistant-backend-88gw.onrender.com.
+ * Local development keeps `config.json` empty instead, so calls stay same-origin
+ * and the dev-server proxy forwards them past CORS (see `proxy.conf.json`).
+ */
+export const API_BASE_URL = 'https://knowledge-assistant-backend-88gw.onrender.com';
 
 /**
  * How long a single request may take before it is abandoned.
@@ -19,7 +20,12 @@ export const API_BASE_URL = 'http://127.0.0.1:8099';
 export const API_TIMEOUT_MS = 90_000;
 
 /**
- * Where this browser's session id is kept, so its sessions are still its own
+ * Where this browser's session id is kept, so its conversations are still its own
  * after a reload.
+ *
+ * `localStorage` rather than `sessionStorage` on purpose. The backend scopes
+ * history to a session id and never expires it within the day, so a session
+ * started in one tab is still there in the next one, and dropping the id when
+ * the tab closed would strand every session this browser had.
  */
 export const SESSION_ID_STORAGE_KEY = 'ika.sessionId';

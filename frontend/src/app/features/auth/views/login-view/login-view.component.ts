@@ -1,6 +1,6 @@
 import { Component, inject, signal, computed } from '@angular/core';
 import { FormBuilder, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
-import { Router, ActivatedRoute } from '@angular/router';
+import { Router, ActivatedRoute, RouterLink } from '@angular/router';
 
 import { AuthService } from '../../../../core/services/auth.service';
 import { ApiError } from '../../../../core/services/api.service';
@@ -11,7 +11,7 @@ const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
 @Component({
   selector: 'app-login-view',
   standalone: true,
-  imports: [ReactiveFormsModule],
+  imports: [ReactiveFormsModule, RouterLink],
   template: `
     <div class="flex min-h-dvh items-center justify-center bg-background px-4">
       <div class="w-full max-w-md">

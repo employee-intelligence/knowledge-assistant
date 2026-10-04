@@ -1,0 +1,44 @@
+{
+  "/auth": {
+    "target": "https://knowledge-assistant-backend-88gw.onrender.com",
+    "secure": true,
+    "changeOrigin": true,
+    "logLevel": "warn"
+  },
+  "/sessions": {
+    "target": "https://knowledge-assistant-backend-88gw.onrender.com",
+    "secure": true,
+    "changeOrigin": true,
+    "logLevel": "warn"
+  },
+  "/chat": {
+    "target": "https://knowledge-assistant-backend-88gw.onrender.com",
+    "secure": true,
+    "changeOrigin": true,
+    "logLevel": "warn"
+  },
+  "/history": {
+    "target": "https://knowledge-assistant-backend-88gw.onrender.com",
+    "secure": true,
+    "changeOrigin": true,
+    "logLevel": "warn"
+  },
+  "/admin": {
+    "target": "https://knowledge-assistant-backend-88gw.onrender.com",
+    "secure": true,
+    "changeOrigin": true,
+    "logLevel": "warn"
+  },
+  "/health": {
+    "target": "https://knowledge-assistant-backend-88gw.onrender.com",
+    "secure": true,
+    "changeOrigin": true,
+    "logLevel": "warn"
+  },
+  "/documents": {
+    "target": "https://knowledge-assistant-backend-88gw.onrender.com",
+    "secure": true,
+    "changeOrigin": true,
+    "logLevel": "warn"
+  }
+}

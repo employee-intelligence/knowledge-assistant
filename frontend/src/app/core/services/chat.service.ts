@@ -30,7 +30,7 @@ export class ChatService {
     this.errorState.set(null);
 
     return this.api.getHistory(sessionId).pipe(
-      map((dto) => this.api.toSessionThread(dto)),
+      map((items) => this.api.toSessionThread(sessionId, items)),
       tap((thread) => {
         this.threadState.set(thread);
         this.messages.set(thread.messages);
@@ -72,15 +72,18 @@ export class ChatService {
     this.messages.update((msgs) => [...msgs, userMessage]);
 
     return this.api.chat(thread.id, content).pipe(
-      map((response) => ({
-        id: `assistant-${Date.now()}`,
-        role: 'assistant' as const,
-        text: response.response,
-        createdAt: new Date().toISOString(),
-        status: 'answered' as const,
-        sources: [],
-        documentCount: 0,
-      })),
+      map((response) => {
+        const sources = (response.sources ?? []).map((s) => this.api.toSource(s));
+        return {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant' as const,
+          text: response.answer,
+          createdAt: new Date().toISOString(),
+          status: 'answered' as const,
+          sources,
+          documentCount: new Set(sources.map((s) => s.document)).size,
+        };
+      }),
       tap((assistantMessage) => {
         // Replace the pending user message with the confirmed one, add assistant
         this.messages.update((msgs) =>

@@ -1,5 +1,5 @@
 import { Component, inject, OnInit, signal } from '@angular/core';
-import { ActivatedRoute, Router } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 
 import { AuthService } from '../../core/services/auth.service';
@@ -11,7 +11,7 @@ import { MessageBubbleComponent } from '../../features/response/components/messa
 @Component({
   selector: 'app-chat-view',
   standalone: true,
-  imports: [ReactiveFormsModule, MessageBubbleComponent],
+  imports: [ReactiveFormsModule, RouterLink, MessageBubbleComponent],
   template: `
     <div class="flex h-dvh flex-col bg-background">
       <header class="border-b bg-card px-4 py-3">

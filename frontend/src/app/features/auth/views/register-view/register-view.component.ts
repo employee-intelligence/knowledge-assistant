@@ -1,6 +1,6 @@
 import { Component, inject, signal, computed } from '@angular/core';
 import { AbstractControl, FormBuilder, FormGroup, ReactiveFormsModule, ValidationErrors, Validators } from '@angular/forms';
-import { Router } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 
 import { AuthService } from '../../../../core/services/auth.service';
 import { ApiError } from '../../../../core/services/api.service';
@@ -15,7 +15,7 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
 @Component({
   selector: 'app-register-view',
   standalone: true,
-  imports: [ReactiveFormsModule],
+  imports: [ReactiveFormsModule, RouterLink],
   template: `
     <div class="flex min-h-dvh items-center justify-center bg-background px-4">
       <div class="w-full max-w-md">
@@ -23,21 +23,6 @@ function passwordsMatchValidator(control: AbstractControl): ValidationErrors | n
           <div class="text-center mb-6">
             <h1 class="text-2xl font-bold text-foreground">Create an account</h1>
             <p class="mt-1 text-sm text-muted-foreground">Enter your details to get started</p>
-          </div>
-
-          <div>
-            <label for="name" class="block text-sm font-medium text-foreground mb-1">Full name</label>
-            <input
-              id="name"
-              type="text"
-              formControlName="name"
-              class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent"
-              placeholder="John Doe"
-              autocomplete="name"
-            />
-            @if (nameError()) {
-              <p class="mt-1 text-sm text-destructive">{{ nameError() }}</p>
-            }
           </div>
 
           <div>
@@ -119,7 +104,6 @@ export class RegisterViewComponent {
   private readonly toast = inject(ToastService);
 
   protected readonly form = this.formBuilder.nonNullable.group({
-    name: ['', [Validators.required, Validators.minLength(1)]],
     email: ['', [Validators.required, Validators.email]],
     password: ['', [Validators.required, Validators.minLength(8)]],
     confirmPassword: ['', [Validators.required]],
@@ -127,12 +111,6 @@ export class RegisterViewComponent {
 
   protected readonly isSubmitting = signal(false);
   private readonly submitted = signal(false);
-
-  protected readonly nameError = computed(() => {
-    if (!this.submitted()) return '';
-    const control = this.form.controls.name;
-    return control.hasError('required') ? 'Enter your name' : '';
-  });
 
   protected readonly emailError = computed(() => {
     if (!this.submitted()) return '';
@@ -161,15 +139,15 @@ export class RegisterViewComponent {
   protected onSubmit(): void {
     this.submitted.set(true);
 
-    if (this.nameError() || this.emailError() || this.passwordError() || this.confirmPasswordError() || this.form.invalid) {
+    if (this.emailError() || this.passwordError() || this.confirmPasswordError() || this.form.invalid) {
       return;
     }
 
     this.isSubmitting.set(true);
 
-    const { name, email, password } = this.form.getRawValue();
+    const { email, password } = this.form.getRawValue();
 
-    this.auth.register(name, email, password).subscribe({
+    this.auth.register(email, password).subscribe({
       next: () => {
         this.isSubmitting.set(false);
         this.toast.success('Account created successfully');

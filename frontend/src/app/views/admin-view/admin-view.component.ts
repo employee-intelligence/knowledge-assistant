@@ -60,8 +60,7 @@ import { UserDto, Role, ROLE_LABELS } from '../../core/models/auth.model';
               <table class="w-full">
                 <thead class="bg-muted">
                   <tr>
-                    <th class="text-left p-3 font-medium text-foreground">Name</th>
-                    <th class="text-left p-3 font-medium text-foreground">Email</th>
+                    <th class="text-left p-3 font-medium text-foreground">Account</th>
                     <th class="text-left p-3 font-medium text-foreground">Role</th>
                     <th class="text-left p-3 font-medium text-foreground">Actions</th>
                   </tr>
@@ -69,8 +68,12 @@ import { UserDto, Role, ROLE_LABELS } from '../../core/models/auth.model';
                 <tbody>
                   @for (user of users(); track user.id) {
                     <tr class="border-t hover:bg-accent/50">
-                      <td class="p-3">{{ user.name }}</td>
-                      <td class="p-3 text-sm text-muted-foreground">{{ user.email }}</td>
+                      <td class="p-3">
+                        <span class="font-medium">{{ user.email }}</span>
+                        @if (!user.is_active) {
+                          <span class="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">inactive</span>
+                        }
+                      </td>
                       <td class="p-3">
                         <span
                           class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium"
@@ -86,7 +89,8 @@ import { UserDto, Role, ROLE_LABELS } from '../../core/models/auth.model';
                             (change)="onRoleChange(user.id, $event)"
                             class="rounded-md border border-input bg-background px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                           >
-                            <option value="employee">Employee</option>
+                            <option value="staff">Staff</option>
+                            <option value="intern">Intern</option>
                             <option value="admin">Administrator</option>
                           </select>
                           @if (user.id !== auth.user()?.id) {
@@ -139,8 +143,8 @@ export class AdminViewComponent implements OnInit {
     this.error.set(null);
 
     this.api.getUsers().subscribe({
-      next: (response) => {
-        this.users.set(response.users as UserDto[]);
+      next: (users) => {
+        this.users.set(users);
         this.isLoading.set(false);
       },
       error: (err: unknown) => {
@@ -156,9 +160,9 @@ export class AdminViewComponent implements OnInit {
     const role = select.value as Role;
 
     this.api.updateUserRole(userId, role).subscribe({
-      next: () => {
+      next: (updated) => {
         this.users.update((users) =>
-          users.map((u) => (u.id === userId ? { ...u, role } : u)),
+          users.map((u) => (u.id === userId ? updated : u)),
         );
       },
       error: (err: unknown) => {
@@ -205,7 +209,9 @@ export class AdminViewComponent implements OnInit {
     switch (role) {
       case 'admin':
         return 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200';
-      case 'employee':
+      case 'intern':
+        return 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200';
+      case 'staff':
       default:
         return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200';
     }

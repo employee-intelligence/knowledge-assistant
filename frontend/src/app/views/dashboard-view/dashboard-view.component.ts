@@ -1,5 +1,5 @@
 import { Component, inject } from '@angular/core';
-import { Router } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 
 import { AuthService } from '../../core/services/auth.service';
 import { ChatService } from '../../core/services/chat.service';
@@ -8,13 +8,14 @@ import { SessionService } from '../../core/services/session.service';
 @Component({
   selector: 'app-dashboard-view',
   standalone: true,
+  imports: [RouterLink],
   template: `
     <div class="flex h-dvh flex-col bg-background">
       <header class="border-b bg-card px-4 py-3">
         <div class="flex items-center justify-between">
           <h1 class="text-xl font-semibold text-foreground">Internal Knowledge Assistant</h1>
           <div class="flex items-center gap-4">
-            <span class="text-sm text-muted-foreground">{{ auth.user()?.name }}</span>
+            <span class="text-sm text-muted-foreground">{{ auth.displayName() }}</span>
             <button
               (click)="onSignOut()"
               class="rounded-md border border-input bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring"

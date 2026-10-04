@@ -1,5 +1,5 @@
-import { Component, inject, OnInit, signal } from '@angular/core';
-import { Router } from '@angular/router';
+import { Component, inject, signal } from '@angular/core';
+import { Router, RouterLink } from '@angular/router';
 import { CommonModule } from '@angular/common';
 
 import { AuthService } from '../../core/services/auth.service';
@@ -9,7 +9,7 @@ import { Session } from '../../core/models/session.model';
 @Component({
   selector: 'app-sessions-view',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, RouterLink],
   template: `
     <div class="flex h-dvh flex-col bg-background">
       <header class="border-b bg-card px-4 py-3">
