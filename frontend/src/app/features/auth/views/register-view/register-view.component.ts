@@ -109,15 +109,9 @@ import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.co
           </p>
         }
 
-        <p
-          class="mt-6 flex flex-col items-center gap-2 border-t border-border pt-4 text-center
-            text-sm text-muted-foreground"
-        >
-          <span>Already have an account?</span>
+        <p class="mt-6 border-t border-border pt-4 text-center text-sm text-muted-foreground">
+          Already have an account?
           <a routerLink="/login" class="font-medium text-primary hover:underline">Sign in</a>
-          <a routerLink="/accept-invite" class="text-xs text-muted-foreground hover:underline">
-            Have an invitation already? Set your password
-          </a>
         </p>
       }
     </app-auth-layout>

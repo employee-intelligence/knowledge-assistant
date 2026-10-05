@@ -184,10 +184,9 @@ export class AcceptInviteViewComponent {
    * The form.
    *
    * The password validator restates the length floor of the server's policy so the
-   * reader finds out before the round trip. The character rules are not validators:
-   * they are the `rules` list rendered underneath the field, which turns them into
-   * something visible rather than a message that only appears on submit. The server
-   * runs all of them and is what decides, so every one of these is a convenience.
+   * reader finds out before the round trip. Length is the whole policy, so it is
+   * the only rule rendered underneath the field. The server runs it and is what
+   * decides, so this is a convenience.
    */
   protected readonly form = this.formBuilder.nonNullable.group({
     name: ['', [Validators.required, Validators.maxLength(120)]],
@@ -263,8 +262,6 @@ export class AcceptInviteViewComponent {
         label: `At least ${MIN_PASSWORD_LENGTH} characters`,
         met: value.length >= MIN_PASSWORD_LENGTH,
       },
-      { label: 'At least one number', met: /\d/.test(value) },
-      { label: 'At least one symbol', met: /[^A-Za-z0-9]/.test(value) },
     ];
   });
 

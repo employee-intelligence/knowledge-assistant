@@ -357,7 +357,7 @@ class PasswordTest(AuthTestCase):
         self.assertTrue(stored.startswith("$2b$"), stored)
         self.assertNotIn(PASSWORD, stored)
 
-    def test_weak_passwords_are_refused_with_the_policy_spelled_out(self) -> None:
+    def test_short_passwords_are_refused_and_six_chars_needs_no_mix(self) -> None:
         admin = self.signed_in_admin()
         token = admin.post(
             "/api/auth/invite",
@@ -365,8 +365,8 @@ class PasswordTest(AuthTestCase):
             headers=self.csrf_headers(admin),
         ).json()["token"]
 
-        # Each of these would otherwise pass a bare length check.
-        for weak in ["short1!", "alllettersonlyone", "12345678901234", "onlyletters123456"]:
+        # Anything under 6 characters is refused.
+        for weak in ["a", "ab12", "abcde"]:
             with self.subTest(password=weak):
                 response = self.new_client().post(
                     "/api/auth/accept-invite", json={"token": token, "password": weak}
@@ -379,6 +379,13 @@ class PasswordTest(AuthTestCase):
             self.new_client().get(f"/api/auth/invite/{token}").status_code,
             200,
         )
+
+        # Six characters with no digit or symbol is accepted: length is the
+        # whole policy.
+        accepted = self.new_client().post(
+            "/api/auth/accept-invite", json={"token": token, "password": "abcdef"}
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
 
     def test_login_compares_against_the_hash(self) -> None:
         self.invite_and_accept(self.new_client(), f"ama@{COMPANY}")

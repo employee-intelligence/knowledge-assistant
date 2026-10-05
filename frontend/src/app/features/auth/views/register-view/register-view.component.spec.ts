@@ -173,9 +173,9 @@ describe('RegisterViewComponent', () => {
     expect(element().querySelector('form')).not.toBeNull();
   });
 
-  it('offers a way back to signing in, and to a link they already have', async () => {
+  it('offers a single-line way back to signing in, and no invite link', async () => {
     expect(element().querySelector('a[href="/login"]')).not.toBeNull();
-    expect(element().querySelector('a[href="/accept-invite"]')).not.toBeNull();
+    expect(element().querySelector('a[href="/accept-invite"]')).toBeNull();
   });
 });
 

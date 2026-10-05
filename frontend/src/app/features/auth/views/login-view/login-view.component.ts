@@ -1,6 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
-import { ActivatedRoute, Router } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 
 import { ButtonComponent } from '../../../../shared/components/button/button.component';
 import { FormFieldComponent } from '../../../../shared/components/form-field/form-field.component';
@@ -42,6 +42,7 @@ const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
     FormFieldComponent,
     IconComponent,
     ReactiveFormsModule,
+    RouterLink,
   ],
   template: `
     <app-auth-layout>
@@ -108,6 +109,10 @@ const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
         </p>
       }
 
+      <p class="mt-6 border-t border-border pt-4 text-center text-sm text-muted-foreground">
+        Don&apos;t have an account?
+        <a routerLink="/register" class="font-medium text-primary hover:underline">Create one</a>
+      </p>
     </app-auth-layout>
   `,
 })

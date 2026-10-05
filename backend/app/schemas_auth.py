@@ -24,9 +24,9 @@ Role = Literal["employee", "admin"]
 # it measures what will actually be stored rather than what arrived over the wire.
 NameStr = Annotated[str, Field(min_length=1, max_length=120)]
 
-# bcrypt reads at most 72 bytes; the policy floor is 12 characters, which no real
-# password falls below and no guessable one clears.
-MIN_PASSWORD_LENGTH = 12
+# bcrypt reads at most 72 bytes; the policy floor is 6 characters and there are
+# no character-class requirements.
+MIN_PASSWORD_LENGTH = 6
 MAX_PASSWORD_LENGTH = 128
 
 
@@ -56,25 +56,15 @@ def _company_email(value: str) -> str:
 def check_password_policy(value: str) -> str:
     """The password policy, enforced here rather than in the browser.
 
-    Length first, then a mix. Twelve characters is the floor that matters most on
-    its own; the character classes stop the passwords that satisfy length by being
-    one repeated letter. `accept-invite` is the only route that sets a password, so
-    this is the only place a weak one can enter the database.
+    Length only: anything from 6 to 128 characters is accepted, with no
+    character-class requirements. `accept-invite` is the only route that sets
+    a password, so this is the only place a weak one can enter the database.
     """
     if len(value) < MIN_PASSWORD_LENGTH:
         raise ValueError(f"Use at least {MIN_PASSWORD_LENGTH} characters")
 
     if len(value) > MAX_PASSWORD_LENGTH:
         raise ValueError(f"Use at most {MAX_PASSWORD_LENGTH} characters")
-
-    if not any(character.isalpha() for character in value):
-        raise ValueError("Include at least one letter")
-
-    if not any(character.isdigit() for character in value):
-        raise ValueError("Include at least one number")
-
-    if not any(not character.isalnum() for character in value):
-        raise ValueError("Include at least one symbol")
 
     return value
 

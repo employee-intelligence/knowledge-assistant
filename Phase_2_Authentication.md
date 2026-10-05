@@ -215,7 +215,7 @@ so a caller cannot probe which single condition failed.
 ### `POST /api/auth/accept-invite` — rate limited
 Request: `{ "token": "...", "password": "..." }`
 - `token`: 16–64 chars.
-- `password`: 12–128 chars, must contain a letter, a digit and a symbol.
+- `password`: 6–128 chars, no character-class requirements.
 
 Response: `200 { "user": { "id", "name", "email", "role" } }` and both cookies are
 set, so accepting an invitation signs the person straight in. The invite is marked

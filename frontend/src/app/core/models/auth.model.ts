@@ -77,7 +77,7 @@ export interface CsrfResponseDto {
  * enforces rather than the rule itself. Kept next to the model it belongs to so
  * the two cannot drift apart without that being obvious.
  */
-export const MIN_PASSWORD_LENGTH = 12;
+export const MIN_PASSWORD_LENGTH = 6;
 
 /** The company domain an address has to be in, for the hint on the login screen. */
 export const COMPANY_EMAIL_DOMAIN = 'acmetech.example';

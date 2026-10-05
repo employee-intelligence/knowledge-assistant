@@ -83,13 +83,8 @@ describe('LoginViewComponent', () => {
     expect(element().textContent).not.toContain('Forgot password?');
   });
 
-  it('offers no way in without an account, so the form cannot dead-end', async () => {
-    // Both routes are deliberately unlinked. Requesting access and accepting an
-    // invitation are reached by somebody who already has a reason to — a link an
-    // administrator sent, or a colleague who told them — and offering them here put
-    // the two most likely dead ends in front of every person who simply mistyped.
-    // An administrator issues accounts directly, so there is nothing to request.
-    expect(element().querySelector('a[href="/register"]')).toBeNull();
+  it('offers a way to request access, so the form cannot dead-end', async () => {
+    expect(element().querySelector('a[href="/register"]')).not.toBeNull();
     expect(element().querySelector('a[href="/accept-invite"]')).toBeNull();
   });
 
