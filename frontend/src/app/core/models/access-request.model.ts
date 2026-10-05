@@ -4,6 +4,7 @@ import type { Role } from './auth.model';
 export interface AccessRequestDto {
   name: string;
   email: string;
+  password: string;
 }
 
 /**

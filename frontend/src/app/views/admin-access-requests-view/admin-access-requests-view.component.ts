@@ -50,11 +50,11 @@ const STATUS_LABELS: Record<AccessRequestStatus, string> = {
  * with the role set to Administrator is the only way that role comes into being
  * through this route.
  *
- * Approving hands back an invitation link, because there is no mail service: the
- * administrator copies it and sends it, which is the same workflow as inviting
- * somebody directly. It is shown once per approval rather than stored, because it is
- * a single-use secret and leaving it lying around in a list would be the wrong place
- * for it.
+ * Approving activates the account with the password they chose when registering,
+ * so they can sign in straight away. Requests made before the register form grew
+ * password fields carry no password and still hand back an invitation link, shown
+ * once per approval rather than stored, because it is a single-use secret and
+ * leaving it lying around in a list would be the wrong place for it.
  */
 @Component({
   selector: 'app-admin-access-requests-view',
@@ -76,8 +76,8 @@ const STATUS_LABELS: Record<AccessRequestStatus, string> = {
       <div class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
         <div class="mx-auto w-full max-w-5xl">
           <p class="text-sm text-muted-foreground">
-            People waiting to be given an account. Approving sends them a link to set their own
-            password.
+            People waiting to be given an account. Approving activates them with the
+            password they chose, so they can sign in straight away.
           </p>
 
           @if (failure()) {

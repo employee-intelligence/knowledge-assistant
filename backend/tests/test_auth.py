@@ -897,11 +897,11 @@ class AccessRequestTest(AuthTestCase):
     queue, the invitation, the idempotence — is in service of that.
     """
 
-    def asks_for(self, client: TestClient, email: str = f"newcomer@{COMPANY}"):
+    def asks_for(self, client: TestClient, email: str = f"newcomer@{COMPANY}", password: str = PASSWORD):
         """Posts a request the way the frontend does, CSRF header and all."""
         return client.post(
             "/api/auth/request-access",
-            json={"name": "Kofi Mensah", "email": email},
+            json={"name": "Kofi Mensah", "email": email, "password": password},
             headers=self.csrf_headers(client),
         )
 
@@ -1026,21 +1026,66 @@ class AccessRequestTest(AuthTestCase):
         self.assertIsNone(self.stored_user(f"newcomer@{COMPANY}"))
         self.assertEqual(self.db.query(Invite).count(), 0)
 
-    def test_approving_provisions_the_account_and_returns_the_invite_link(self) -> None:
-        self.asks_for(self.new_client())
+    def test_approving_activates_the_account_with_the_chosen_password(self) -> None:
+        client = self.new_client()
+        self.assertEqual(self.asks_for(client).status_code, 202)
         admin = self.signed_in_admin()
 
         response = self.approve(admin, self.request_id_for(f"newcomer@{COMPANY}"))
 
         self.assertEqual(response.status_code, 200, response.text)
+        # No invitation needed: the password was chosen at registration.
+        self.assertEqual(response.json()["invite_link"], "")
+        self.assertEqual(response.json()["token"], "")
+
+        # The account is active with that password, so sign-in works at once.
+        user = self.stored_user(f"newcomer@{COMPANY}")
+        self.assertTrue(user.is_active)
+        self.assertNotIn(PASSWORD, user.password_hash)
+
+        signed_in = self.new_client().post(
+            "/api/auth/login", json={"email": f"newcomer@{COMPANY}", "password": PASSWORD}
+        )
+        self.assertEqual(signed_in.status_code, 200, signed_in.text)
+
+    def test_nothing_can_sign_in_before_approval(self) -> None:
+        self.assertEqual(self.asks_for(self.new_client()).status_code, 202)
+
+        response = self.new_client().post(
+            "/api/auth/login", json={"email": f"newcomer@{COMPANY}", "password": PASSWORD}
+        )
+
+        # No user row exists until approval, so this answers like a wrong password.
+        self.assertEqual(response.status_code, 401)
+        self.assertIsNone(self.stored_user(f"newcomer@{COMPANY}"))
+
+    def test_a_weak_password_is_refused(self) -> None:
+        response = self.asks_for(self.new_client(), password="abc")
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(self.count_requests(), 0)
+
+    def test_a_request_from_before_passwords_still_gets_an_invite(self) -> None:
+        """Old queue rows carry no hash and fall back to the invitation flow."""
+        self.db.add(
+            AccessRequest(
+                id="legacy-request-id",
+                name="Kofi Mensah",
+                email=f"newcomer@{COMPANY}",
+                status="pending",
+                password_hash=None,
+            )
+        )
+        self.db.commit()
+        admin = self.signed_in_admin()
+
+        response = self.approve(admin, "legacy-request-id")
+
+        self.assertEqual(response.status_code, 200, response.text)
         self.assertIn("/accept-invite?token=", response.json()["invite_link"])
 
-        # The invitation is a working one, so the person the link goes to can finish.
         invited = self.new_client().get(f"/api/auth/invite/{response.json()['token']}")
-
         self.assertEqual(invited.status_code, 200, invited.text)
-        self.assertEqual(invited.json()["name"], "Kofi Mensah")
-        self.assertEqual(invited.json()["email"], f"newcomer@{COMPANY}")
 
     def test_the_invite_link_only_reaches_the_administrator(self) -> None:
         """The person who asked never sees the token.
@@ -1177,7 +1222,7 @@ class AccessRequestTest(AuthTestCase):
     def test_a_request_without_a_csrf_header_is_refused(self) -> None:
         response = self.new_client().post(
             "/api/auth/request-access",
-            json={"name": "Kofi Mensah", "email": f"newcomer@{COMPANY}"},
+            json={"name": "Kofi Mensah", "email": f"newcomer@{COMPANY}", "password": PASSWORD},
         )
 
         # Not exempt, unlike signing in. There is nothing here that needs an

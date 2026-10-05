@@ -192,6 +192,13 @@ class AccessRequest(Base):
     invite_token: Mapped[str | None] = mapped_column(
         String(64), nullable=True, default=None
     )
+    # bcrypt hash of the password chosen at registration. Set for every request
+    # made since the register form grew password fields; null for older rows,
+    # which fall back to the invitation flow on approval. Never the plaintext:
+    # a queue an administrator reads must not contain a password anybody could.
+    password_hash: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, default=None
+    )
 
 
 # Refresh tokens are looked up by user when a family is revoked, and by family

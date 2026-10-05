@@ -37,6 +37,8 @@ describe('RegisterViewComponent', () => {
   const fillValid = (): void => {
     type(0, 'Kofi Mensah');
     type(1, `kofi@${DOMAIN}`);
+    type(2, 'correct-horse-1!');
+    type(3, 'correct-horse-1!');
   };
 
   /** The one request this screen can make. */
@@ -53,13 +55,11 @@ describe('RegisterViewComponent', () => {
     await render();
   });
 
-  it('asks for a name and an address, and nothing else', async () => {
-    // No password, and no confirmation. That absence is the whole difference between
-    // asking for access and registering: there is nothing here to set a password with.
+  it('asks for a name, an address and a password with confirmation', async () => {
     expect(element().textContent).toContain('Request access');
-    expect(fields().length).toBe(2);
-    expect(fields().map((field) => field.type)).toEqual(['text', 'email']);
-    expect(element().textContent).not.toContain('Password');
+    expect(fields().length).toBe(4);
+    expect(fields().map((field) => field.type)).toEqual(['text', 'email', 'password', 'password']);
+    expect(element().textContent).toContain('At least 6 characters');
   });
 
   it('says the account is not created yet, so nobody expects to be signed in', async () => {
@@ -70,20 +70,27 @@ describe('RegisterViewComponent', () => {
     await render();
 
     // The one thing that must not be implied: that filling this in signed anybody in.
-    expect(element().textContent).toContain('an administrator will review');
+    expect(element().textContent).toContain('with an administrator now');
+    expect(element().textContent).toContain('once they approve it');
     expect(element().textContent).not.toContain('you are now signed in');
     expect(element().querySelector('app-form-field')).toBeNull();
   });
 
-  it('sends the name and the address, trimmed', async () => {
+  it('sends the name, the address and the password, trimmed', async () => {
     type(0, '  Kofi Mensah  ');
     type(1, `  kofi@${DOMAIN}  `);
+    type(2, 'correct-horse-1!');
+    type(3, 'correct-horse-1!');
     await submit();
 
     const request = http.expectOne(REQUEST_URL);
 
     expect(request.request.method).toBe('POST');
-    expect(request.request.body).toEqual({ name: 'Kofi Mensah', email: `kofi@${DOMAIN}` });
+    expect(request.request.body).toEqual({
+      name: 'Kofi Mensah',
+      email: `kofi@${DOMAIN}`,
+      password: 'correct-horse-1!',
+    });
     request.flush({ status: 'received' });
   });
 
@@ -96,8 +103,29 @@ describe('RegisterViewComponent', () => {
     // whole security property of the request flow.
     const request = http.expectOne(REQUEST_URL);
 
-    expect(Object.keys(request.request.body as object).sort()).toEqual(['email', 'name']);
+    expect(Object.keys(request.request.body as object).sort()).toEqual([
+      'email',
+      'name',
+      'password',
+    ]);
     request.flush({ status: 'received' });
+  });
+
+  it('refuses a short password and a mismatch before making a round trip', async () => {
+    fillValid();
+    type(2, 'abc');
+    type(3, 'abc');
+    await submit();
+
+    expect(element().textContent).toContain('satisfies every rule');
+    http.expectNone(REQUEST_URL);
+
+    fillValid();
+    type(3, 'something-else-1!');
+    await submit();
+
+    expect(element().textContent).toContain('Passwords do not match');
+    http.expectNone(REQUEST_URL);
   });
 
   it('refuses an address outside the company before making a round trip', async () => {
@@ -125,6 +153,8 @@ describe('RegisterViewComponent', () => {
 
     expect(element().textContent).toContain('Enter your full name');
     expect(element().textContent).toContain('Enter your work email');
+    expect(element().textContent).toContain('Choose a password');
+    expect(element().textContent).toContain('Type your password again');
     http.expectNone(REQUEST_URL);
   });
 

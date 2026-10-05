@@ -591,7 +591,7 @@ def request_access(
     db: Session = Depends(get_db),
     _csrf: None = Depends(require_csrf),
 ) -> AccessRequestSubmittedResponse:
-    """Somebody asking for an account, for an administrator to decide on.
+    """Somebody registering for an account, for an administrator to decide on.
 
     This is the middle road between the two shapes that were both wrong. An open
     registration form lets anyone who can type a colleague's company address claim
@@ -602,6 +602,10 @@ def request_access(
     no `users` row exists until an administrator approves one, so nothing here can be
     logged into, and nothing here can set a role — the field is not on the model, so
     a client that sends one has it ignored rather than honoured.
+
+    The password is chosen now and stored as a hash on the request. Approval moves
+    that hash onto the new account and activates it, so the person signs in with
+    the password they already picked rather than through a second invitation link.
 
     No role on the request model is the whole security property. An administrator is
     granted by an administrator.
@@ -630,6 +634,7 @@ def request_access(
             name=req.name,
             email=req.email,
             status="pending",
+            password_hash=hash_password(req.password),
         )
     )
     db.commit()
@@ -705,10 +710,16 @@ def approve_access_request(
     admin: User = Depends(require_admin),
     _csrf: None = Depends(require_csrf),
 ) -> AccessRequestDecisionResponse:
-    """Approves a request, which provisions the account and mints its invitation.
+    """Approves a request, which creates the account ready to sign in.
 
     The role comes from this request, not from the person who asked. That is the one
     thing an approval decides that the requester was never allowed to state.
+
+    The password was chosen at registration and stored as a hash on the request, so
+    approval moves it onto the account and activates it: the person signs in with
+    what they already picked, and no invitation link is needed. Requests made before
+    the register form grew password fields carry no hash and fall back to the
+    invitation flow, so old rows in the queue still resolve.
     """
     row = _pending_request_or_409(db, request_id)
 
@@ -722,6 +733,48 @@ def approve_access_request(
         row.decided_at = datetime.now(timezone.utc)
         row.decided_by = admin.id
         db.commit()
+
+        return AccessRequestDecisionResponse(
+            request=_access_request_dto(row),
+            invite_link="",
+            token="",
+            expires_at="",
+        )
+
+    if row.password_hash:
+        user = existing_user
+        if user is None:
+            user = User(
+                id=secrets.token_urlsafe(16),
+                email=row.email,
+                name=row.name,
+                role=req.role,
+                password_hash=row.password_hash,
+                is_active=True,
+            )
+            db.add(user)
+        else:
+            # Invited directly and never accepted: reuse the row so the id an
+            # outstanding invitation points at stays valid, drop that invitation
+            # since there is no longer any link to follow, and activate with the
+            # password they chose themselves.
+            user.name = row.name
+            user.role = req.role
+            user.password_hash = row.password_hash
+            user.is_active = True
+            user.updated_at = datetime.now(timezone.utc)
+            db.query(Invite).filter(
+                Invite.user_id == user.id, Invite.used_at.is_(None)
+            ).delete(synchronize_session=False)
+
+        row.status = "approved"
+        row.decided_at = datetime.now(timezone.utc)
+        row.decided_by = admin.id
+        row.invite_token = None
+        db.commit()
+        db.refresh(user)
+
+        logger.info("approved %s as %s; account active with chosen password", user.email, user.role)
 
         return AccessRequestDecisionResponse(
             request=_access_request_dto(row),

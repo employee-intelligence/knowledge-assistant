@@ -253,20 +253,21 @@ export class AuthService {
   }
 
   /**
-  /**
-   * `POST /api/auth/request-access`. Asks an administrator for an account.
+   * `POST /api/auth/request-access`. Registers with a password, pending approval.
    *
    * Creates a request and nothing else: no account exists until somebody approves
-   * one. That is what makes this safe to leave open, where a plain registration form
-   * would let anyone who could type a colleague's address claim it.
+   * one, so nothing here can sign in yet. Approval moves the password onto the
+   * new account and activates it. That is what makes this safe to leave open,
+   * where a plain registration form would let anyone who could type a colleague's
+   * address claim it.
    *
    * A CSRF header is attached to it by the interceptor, unlike signing in. There is
    * nothing here that needs an exemption — the token comes from a public endpoint and
    * the frontend has one before this screen is reachable — so requiring it costs
    * nothing and closes a way to fill an administrator's queue from another site.
    */
-  requestAccess(name: string, email: string): Observable<AccessRequestSubmittedDto> {
-    const body: AccessRequestDto = { name: name.trim(), email: email.trim() };
+  requestAccess(name: string, email: string, password: string): Observable<AccessRequestSubmittedDto> {
+    const body: AccessRequestDto = { name: name.trim(), email: email.trim(), password };
 
     return this.http.post<AccessRequestSubmittedDto>(
       `${API_BASE_URL}/api/auth/request-access`,

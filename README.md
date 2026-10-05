@@ -257,9 +257,9 @@ in a response body.
 | `GET` | `/api/auth/me` | access cookie | The signed-in user: `id`, `name`, `email`, `role` |
 | `POST` | `/api/auth/invite` | **admin** | Creates a pending user, returns the invite link |
 | `POST` | `/api/auth/accounts` | **admin** | Creates an active user outright, with a password the admin chooses |
-| `POST` | `/api/auth/request-access` | public, CSRF, rate limited | `{ name, email }` — asks for an account. Creates no account |
+| `POST` | `/api/auth/request-access` | public, CSRF, rate limited | `{ name, email, password }` — registers. Creates no account until approved |
 | `GET` | `/api/auth/requests` | **admin** | Everybody waiting, pending first |
-| `POST` | `/api/auth/requests/{id}/approve` | **admin** | Provisions the account, returns the invite link |
+| `POST` | `/api/auth/requests/{id}/approve` | **admin** | Activates the account with the chosen password (invite link only for pre-password requests) |
 | `POST` | `/api/auth/requests/{id}/decline` | **admin** | Turns it down; provisions nothing |
 | `GET` | `/api/auth/invite/{token}` | public | What the invitation is for, to pre-fill the accept screen |
 | `POST` | `/api/auth/bootstrap-admin` | `AUTH_BOOTSTRAP_KEY`, once only | Creates the first administrator |

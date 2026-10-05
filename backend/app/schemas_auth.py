@@ -57,8 +57,9 @@ def check_password_policy(value: str) -> str:
     """The password policy, enforced here rather than in the browser.
 
     Length only: anything from 6 to 128 characters is accepted, with no
-    character-class requirements. `accept-invite` is the only route that sets
-    a password, so this is the only place a weak one can enter the database.
+    character-class requirements. Registration and `accept-invite` are the two
+    routes that set a password, so these are the two places one can enter the
+    database.
     """
     if len(value) < MIN_PASSWORD_LENGTH:
         raise ValueError(f"Use at least {MIN_PASSWORD_LENGTH} characters")
@@ -224,16 +225,21 @@ class CreateAccountRequest(BaseModel):
 
 
 class AccessRequestRequest(BaseModel):
-    """Somebody asking for an account.
+    """Somebody registering for an account.
 
     No `role`, and that is deliberate rather than an oversight. A requester naming
     their own role is asking for the one thing an administrator exists to decide, so
     the field is not on the model at all — a client sending one is ignored, not
     honoured. The role is chosen by whoever approves it.
+
+    The password is chosen here, stored as a hash on the request, and moved onto
+    the account when an administrator approves it. Nothing can sign in with it
+    until then: no `users` row exists before approval.
     """
 
     name: NameStr
     email: EmailStr
+    password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
 
     @field_validator("name")
     @classmethod
@@ -244,6 +250,11 @@ class AccessRequestRequest(BaseModel):
     @classmethod
     def check_company_domain(cls, value: str) -> str:
         return _company_email(value)
+
+    @field_validator("password")
+    @classmethod
+    def check_policy(cls, value: str) -> str:
+        return check_password_policy(value)
 
 
 class AccessRequestDto(BaseModel):

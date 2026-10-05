@@ -5,23 +5,28 @@ import { RouterLink } from '@angular/router';
 import { ButtonComponent } from '../../../../shared/components/button/button.component';
 import { FormFieldComponent } from '../../../../shared/components/form-field/form-field.component';
 import { IconComponent } from '../../../../shared/components/icon/icon.component';
-import { COMPANY_EMAIL_DOMAIN, isCompanyEmail } from '../../../../core/models/auth.model';
+import { COMPANY_EMAIL_DOMAIN, MIN_PASSWORD_LENGTH, isCompanyEmail } from '../../../../core/models/auth.model';
 import { AuthService } from '../../../../core/services/auth.service';
 import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.component';
 
+/** One rule a new password has to satisfy. */
+interface PasswordRule {
+  label: string;
+  met: boolean;
+}
+
 /**
- * Asking for an account.
+ * Registering for an account.
  *
- * This is not registration, and the difference is the whole point of the screen. It
- * creates a request that an administrator reads; it does not create an account, and
- * it cannot. Nothing here is signed in, nothing gets a role, and nothing works until
- * somebody approves it.
+ * This creates a request that an administrator reads; it does not create an
+ * account, and it cannot. Nothing here is signed in, nothing gets a role, and
+ * nothing works until somebody approves it — at which point the password chosen
+ * here becomes the account's password and signing in just works.
  *
- * The shape it replaces was a self-service form that would have let anyone who could
- * type a colleague's company address claim that address — a domain check proves the
- * address was typed, not that the mailbox is theirs. This way the person fills in one
- * short form and an administrator decides, which is slower for them and correct for
- * the company.
+ * The shape it replaces asked for no password and sent the person off to set one
+ * through an invitation link after approval. Choosing it up front removes that
+ * second step, which is the thing people tripped on: a link that expires before
+ * it is opened reads as a broken product rather than as a queue still working.
  */
 @Component({
   selector: 'app-register-view',
@@ -40,8 +45,8 @@ import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.co
         Request access
       </h1>
       <p class="mt-1 text-center text-sm text-muted-foreground">
-        Tell us who you are and an administrator will review it. You will get a link to set a
-        password once they do.
+        Choose a password now — you will sign in with it as soon as an administrator
+        approves your request.
       </p>
 
       @if (isSent()) {
@@ -52,8 +57,8 @@ import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.co
           >
             <app-icon name="check-circle-2" [size]="14" class="mt-0.5 shrink-0" />
             <span class="text-left">
-              Thanks — your request is with an administrator now. Watch for a link to set your
-              password.
+              Thanks — your request is with an administrator now. Sign in with your new
+              password once they approve it.
             </span>
           </p>
 
@@ -86,6 +91,43 @@ import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.co
             [value]="email()"
             [error]="emailError()"
             (valueChange)="onEmailChange($event)"
+          />
+
+          <div>
+            <app-form-field
+              label="Password"
+              [faintPlaceholder]="true"
+              type="password"
+              icon="lock"
+              autocomplete="new-password"
+              placeholder="Choose a password"
+              [required]="true"
+              [value]="password()"
+              [error]="passwordError()"
+              (valueChange)="onPasswordChange($event)"
+            />
+
+            <ul class="mt-3 flex flex-col gap-1.5">
+              @for (rule of rules(); track rule.label) {
+                <li class="flex items-center gap-2 text-xs" [class]="ruleClasses(rule.met)">
+                  <app-icon [name]="rule.met ? 'check-circle-2' : 'clock'" [size]="14" />
+                  <span>{{ rule.label }}</span>
+                </li>
+              }
+            </ul>
+          </div>
+
+          <app-form-field
+            label="Confirm password"
+            [faintPlaceholder]="true"
+            type="password"
+            icon="lock"
+            autocomplete="new-password"
+            placeholder="Type it again"
+            [required]="true"
+            [value]="confirmation()"
+            [error]="confirmationError()"
+            (valueChange)="onConfirmationChange($event)"
           />
 
           <button app-button type="submit" size="lg" [fullWidth]="true" [disabled]="isSubmitting()">
@@ -127,10 +169,9 @@ export class RegisterViewComponent {
   /**
    * The form.
    *
-   * Two fields and no password, which is the visible difference between asking for
-   * access and registering. There is deliberately nothing to type twice and nothing
-   * to keep: the password is set later, against an invitation, by whoever this is
-   * approved as.
+   * Name, address and a password with confirmation. The password validator
+   * restates the length floor of the server's policy so the reader finds out
+   * before the round trip; the server runs it and is what decides.
    *
    * The address carries a domain check here because the field should say so before
    * the round trip. It is a convenience — the server runs the same rule and is what
@@ -139,6 +180,8 @@ export class RegisterViewComponent {
   protected readonly form = this.formBuilder.nonNullable.group({
     name: ['', [Validators.required, Validators.maxLength(120)]],
     email: ['', [Validators.required, Validators.email]],
+    password: ['', [Validators.required, Validators.minLength(MIN_PASSWORD_LENGTH)]],
+    confirmation: ['', [Validators.required]],
   });
 
   /** Full name as typed. */
@@ -146,6 +189,12 @@ export class RegisterViewComponent {
 
   /** Work email as typed. */
   protected readonly email = signal('');
+
+  /** Chosen password. */
+  protected readonly password = signal('');
+
+  /** Repeated password. */
+  protected readonly confirmation = signal('');
 
   /** Whether the form has been sent, which is when fields start complaining. */
   private readonly submitted = signal(false);
@@ -158,6 +207,21 @@ export class RegisterViewComponent {
 
   /** Explanatory message shown after an attempt. */
   protected readonly notice = signal('');
+
+  /** The rules the new password has to satisfy, and whether each is met. */
+  protected readonly rules = computed<PasswordRule[]>(() => {
+    const value = this.password();
+
+    return [
+      {
+        label: `At least ${MIN_PASSWORD_LENGTH} characters`,
+        met: value.length >= MIN_PASSWORD_LENGTH,
+      },
+    ];
+  });
+
+  /** Whether every password rule is satisfied. */
+  private readonly isPasswordValid = computed(() => this.rules().every((rule) => rule.met));
 
   /** Name error, once the form has been sent. */
   protected readonly nameError = computed(() =>
@@ -187,6 +251,35 @@ export class RegisterViewComponent {
     return '';
   });
 
+  /** Password error, once the form has been sent. */
+  protected readonly passwordError = computed(() => {
+    if (!this.submitted()) {
+      return '';
+    }
+    if (this.password() === '') {
+      return 'Choose a password';
+    }
+
+    return this.isPasswordValid() ? '' : 'Choose a password that satisfies every rule below';
+  });
+
+  /** Mismatch error, once the form has been sent. */
+  protected readonly confirmationError = computed(() => {
+    if (!this.submitted()) {
+      return '';
+    }
+    if (this.confirmation() === '') {
+      return 'Type your password again';
+    }
+
+    return this.confirmation() === this.password() ? '' : 'Passwords do not match';
+  });
+
+  /** Colour of a rule line: met rules pick up the brand, unmet ones stay muted. */
+  protected ruleClasses(met: boolean): string {
+    return met ? 'text-primary' : 'text-muted-foreground';
+  }
+
   protected onNameChange(value: string): void {
     this.name.set(value);
     this.form.controls.name.setValue(value);
@@ -197,18 +290,32 @@ export class RegisterViewComponent {
     this.form.controls.email.setValue(value);
   }
 
+  protected onPasswordChange(value: string): void {
+    this.password.set(value);
+    this.form.controls.password.setValue(value);
+  }
+
+  protected onConfirmationChange(value: string): void {
+    this.confirmation.set(value);
+    this.form.controls.confirmation.setValue(value);
+  }
+
   protected onSubmit(): void {
     this.submitted.set(true);
     this.notice.set('');
 
-    if (this.nameError() || this.emailError() || this.form.invalid) {
+    if (this.nameError() || this.emailError() || this.passwordError() || this.confirmationError() || this.form.invalid) {
       return;
     }
 
     this.isSubmitting.set(true);
 
     this.auth
-      .requestAccess(this.form.controls.name.value, this.form.controls.email.value)
+      .requestAccess(
+        this.form.controls.name.value,
+        this.form.controls.email.value,
+        this.form.controls.password.value,
+      )
       .subscribe({
         next: () => {
           this.isSubmitting.set(false);
@@ -239,6 +346,9 @@ function readRequestFailure(error: unknown): string {
   }
   if (status === 429) {
     return 'Too many attempts. Please wait a moment and try again.';
+  }
+  if (status === 422 && typeof detail === 'string') {
+    return detail;
   }
   if (status === 422) {
     return 'That email address is not one this workspace accepts.';
