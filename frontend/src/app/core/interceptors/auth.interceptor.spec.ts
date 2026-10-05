@@ -35,6 +35,10 @@ describe('authInterceptor', () => {
     // token left behind by one test would silently satisfy the next one's assertion.
     document.cookie = 'ika_csrf=; path=/; max-age=0';
 
+    // The service now remembers who signed in: without this, one test's session
+    // would still be cached when the next test's fresh service starts.
+    localStorage.clear();
+
     await TestBed.configureTestingModule({
       providers: [
         provideRouter([{ path: 'login', children: [] }]),

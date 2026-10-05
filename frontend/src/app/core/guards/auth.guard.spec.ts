@@ -45,6 +45,36 @@ describe('auth guards', () => {
     document.cookie = 'ika_session=1; path=/';
   };
 
+  /** Where the service remembers who signed in between loads. */
+  const SESSION_CACHE_KEY = 'ika.session.v1';
+
+  /** A previous visit's memory, as the service would have written it. */
+  const withCachedSession = (role: 'employee' | 'admin' = 'employee'): void => {
+    localStorage.setItem(
+      SESSION_CACHE_KEY,
+      JSON.stringify({
+        id: 'u1',
+        name: 'Ama Konadu',
+        email: 'ama@acmetech.example',
+        role,
+      }),
+    );
+  };
+
+  /**
+   * Answers the refresh attempt a `GET /api/auth/me` 401 triggers while nobody
+   * is known to be signed in, with a session that is genuinely over.
+   *
+   * The access token dies after fifteen minutes and the refresh token after
+   * fourteen days, so the first 401 alone cannot prove the session is over and
+   * one refresh is tried first.
+   */
+  const answerRefreshExpired = (): void => {
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/refresh`)
+      .flush({ detail: 'No active session.' }, { status: 401, statusText: 'Unauthorized' });
+  };
+
   /**
    * Answers the `GET /api/auth/me` the guard asked for.
    *
@@ -70,6 +100,10 @@ describe('auth guards', () => {
     // Cleared between tests: `document.cookie` outlives the injector, so a hint left
     // behind by one test would make the next one believe it had a session.
     document.cookie = 'ika_session=; path=/; max-age=0';
+
+    // The cached user outlives the injector the same way: a session remembered
+    // by one test would let the next test's guards through without asking.
+    localStorage.clear();
 
     await TestBed.configureTestingModule({
       providers: [
@@ -196,11 +230,43 @@ describe('auth guards', () => {
 
       const result = run(authGuard);
 
-      // The redirect needs the server's 401: nothing may send the person away
-      // before the check that proves the session is over.
+      // The redirect needs the server's answer: nothing may send the person away
+      // before the check that proves the session is over. That answer is two
+      // requests — the access token's 401, then the refresh's refusal — because
+      // the first alone only proves the short-lived token died.
       answerSession(null);
+      answerRefreshExpired();
 
       expect(redirectedTo(await result)).toContain('/login');
+      flushCsrf();
+      http.verify();
+    });
+
+    it('lets a cached session through while the live check is still in flight', async () => {
+      // A refresh with a previous visit's memory: the guard sees who signed in
+      // on the first paint instead of after the round trip. Waiting for the
+      // answer would be a spinner at best; redirecting first would be the
+      // sign-in flash this exists to remove.
+      withCachedSession();
+      await TestBed.inject(AuthService).initialize();
+
+      const result = run(authGuard);
+
+      // The live revalidation is still unanswered behind the guard's decision:
+      // capturing it proves it was in flight, and the guard passing before the
+      // flush below proves the decision came from the cache, not the network.
+      // (`expectOne` consumes the match, so the same handle is flushed rather
+      // than matched again.)
+      const revalidation = http.expectOne(`${API_BASE_URL}/api/auth/me`);
+      expect(await result).toBe(true);
+
+      revalidation.flush({
+        id: 'u1',
+        name: 'Ama Konadu',
+        email: 'ama@acmetech.example',
+        role: 'employee',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
       flushCsrf();
       http.verify();
     });
@@ -260,6 +326,7 @@ describe('auth guards', () => {
       http
         .expectOne(`${API_BASE_URL}/api/auth/me`)
         .flush({ detail: 'Not authenticated' }, { status: 401, statusText: 'Unauthorized' });
+      answerRefreshExpired();
 
       expect(await result).toBe(true);
     });

@@ -1,7 +1,7 @@
 import { isPlatformBrowser } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { Injectable, PLATFORM_ID, computed, inject, signal } from '@angular/core';
-import { Observable, catchError, firstValueFrom, map, of, tap } from 'rxjs';
+import { Observable, catchError, firstValueFrom, from, map, of, tap } from 'rxjs';
 
 import { API_BASE_URL } from '../api.config';
 import {
@@ -38,6 +38,23 @@ const SESSION_HINT_COOKIE = 'ika_session';
 
 /** Header the CSRF cookie's value has to come back in. */
 export const CSRF_HEADER = 'X-CSRF-Token';
+
+/**
+ * Where this browser's memory of who signed in is kept.
+ *
+ * The session cookies live on the API's host and this page cannot read them: on a
+ * split deployment (app on one host, API on another) even the `ika_session` hint
+ * cookie is invisible to frontend JavaScript, because it is a host-only cookie of
+ * the API's host. Without a memory of its own, every refresh settles as "nobody"
+ * and the guards send a signed-in person to the sign-in screen.
+ *
+ * What is stored is the user the server last confirmed — no token, nothing the
+ * server does not already hand out. It is a hint, not a credential: it is
+ * revalidated against `GET /api/auth/me` on the next load, and anything it says
+ * is dropped the moment the server disagrees. Versioned so a future shape change
+ * fails closed (unknown shape reads as "no memory") rather than half-parsed.
+ */
+const SESSION_CACHE_KEY = 'ika.session.v1';
 
 /**
  * Where the app stands on authentication, which is not the same as not being signed
@@ -200,36 +217,67 @@ export class AuthService {
   }
 
   /**
-   * Runs the one startup auth check and records that it settled.
-   *
-   * Idempotent: the first caller starts it and every later caller — the app
-   * initializer, each guard, any test — queues behind the same promise, so
-   * there is exactly one `GET /api/auth/me` per page load, however many ask.
-   *
-   * Asked through the hint-aware path, so a visitor with plainly no session
-   * settles without a request, exactly as the guards already did. A skipped
-   * request is not a skipped check: with no cookies there is nothing `/me`
-   * could have answered with, and firing it anyway would only log a 401 on
-   * every signed-out visit.
-   *
-   * Never rejects. A failed check (expired session, unreachable backend) is an
-   * answer — "nobody is signed in" — not a startup failure, and rejecting here
-   * would either hang the router on a promise that never settles or fail the
-   * whole application boot over a session that simply is not there.
-   *
-   * Safe on the server: `maybeBootstrap` resolves without a request there, so
-   * a server render is never held waiting on a call that could not succeed.
-   */
+    * Runs the one startup auth check and records that it settled.
+    *
+    * Idempotent: the first caller starts it and every later caller — the app
+    * initializer, each guard, any test — queues behind the same promise, so
+    * there is exactly one `GET /api/auth/me` per page load, however many ask.
+    *
+    * Asked through the hint-aware path when there is no cached user, so a visitor
+    * with plainly no session settles without a request, exactly as the guards
+    * already did. A skipped request is not a skipped check: with no cookies there
+    * is nothing `/me` could have answered with, and firing it anyway would only
+    * log a 401 on every signed-out visit.
+    *
+    * When a previous visit cached its user, that answer is restored synchronously
+    * and the check is the background revalidation rather than a blocking question:
+    * the guards and the shell see who signed in on the first paint, with no round
+    * trip and no flash of the sign-in screen. The cache is trusted for the first
+    * paint only — the revalidation replaces it with the server's live answer, and
+    * a session that has since died still lands on the sign-in screen through the
+    * interceptor and the guards, just without having shown it to somebody who is
+    * signed in.
+    *
+    * Never rejects. A failed check (expired session, unreachable backend) is an
+    * answer — "nobody is signed in" — not a startup failure, and rejecting here
+    * would either hang the router on a promise that never settles or fail the
+    * whole application boot over a session that simply is not there.
+    *
+    * Safe on the server: `maybeBootstrap` resolves without a request there, so
+    * a server render is never held waiting on a call that could not succeed.
+    */
   initialize(): Promise<void> {
     if (!this.initPromise) {
-      this.initPromise = this.maybeBootstrap().then(
-        () => undefined,
-        () => undefined,
-      );
-      // Set alongside settlement rather than inside the chain above, so even a
-      // genuinely unexpected throw marks the check done instead of leaving every
-      // guard queued behind it forever.
-      void this.initPromise.finally(() => this.initializedState.set(true));
+      const cached = this.restoreCachedUser();
+
+      if (cached) {
+        this.setUser(cached);
+        this.initializedState.set(true);
+        this.initPromise = Promise.resolve();
+
+        // Revalidate without holding the boot: the guards and the shell already
+        // have their answer. A live session stays exactly where it is; a dead one
+        // is cleared here and the guards move the person to the sign-in screen.
+        void this.bootstrap().then(
+          () => undefined,
+          () => undefined,
+        );
+
+        return this.initPromise;
+      }
+
+      // Chained rather than `void …finally` on purpose: awaiting this promise
+      // means the check has settled AND the flag says so. Resolving first and
+      // setting the flag a microtask later lets the router navigate on a promise
+      // that says "done" while the shell still says "checking".
+      this.initPromise = this.maybeBootstrap()
+        .then(
+          () => undefined,
+          () => undefined,
+        )
+        .finally(() => {
+          this.initializedState.set(true);
+        });
     }
 
     return this.initPromise;
@@ -252,18 +300,28 @@ export class AuthService {
   }
 
   /**
-   * Finds out who is signed in, once, by asking.
-   *
-   * Prefers `maybeBootstrap`, which skips the request when there is plainly no
-   * session. Shared as a promise rather than left to each caller: the route guard
-   * and the app shell both need to know, and two calls could disagree if one landed
-   * before sign-in and the other after it.
-   *
-   * Does nothing on the server. The session is a pair of cookies in the browser and
-   * a server render has neither them nor the `document` the hint is read out of, so
-   * there is no question to answer there — only a round trip that could not succeed
-   * anyway. The guards treat that as "defer to the browser".
-   */
+    * Finds out who is signed in, once, by asking.
+    *
+    * Prefers `maybeBootstrap`, which skips the request when there is plainly no
+    * session. Shared as a promise rather than left to each caller: the route guard
+    * and the app shell both need to know, and two calls could disagree if one landed
+    * before sign-in and the other after it.
+    *
+    * A 401 here is not always "signed out": the access token lives fifteen minutes
+    * and the refresh token fourteen days, so a refresh hours after the last click
+    * routinely meets a dead access token beside a live refresh token. When nobody
+    * is known to be signed in yet — the ordinary refresh case, status still
+    * `unknown` — one refresh is attempted before concluding the session is over.
+    * When somebody already is (the cached-user revalidation), the interceptor has
+    * already had its own refresh attempt at that same 401, so trying again would
+    * present a rotated token as a replay and revoke the whole family: the 401
+    * stands as the answer.
+    *
+    * Does nothing on the server. The session is a pair of cookies in the browser and
+    * a server render has neither them nor the `document` the hint is read out of, so
+    * there is no question to answer there — only a round trip that could not succeed
+    * anyway. The guards treat that as "defer to the browser".
+    */
   bootstrap(): Promise<UserDto | null> {
     if (this.bootstrapPromise) {
       return this.bootstrapPromise;
@@ -273,14 +331,23 @@ export class AuthService {
       return Promise.resolve(null);
     }
 
+    const alreadyKnown = this.isAuthenticated();
+
     this.bootstrapPromise = firstValueFrom(
       this.http.get<UserDto>(`${API_BASE_URL}/api/auth/me`, this.credentials()).pipe(
         tap((user) => this.setUser(user)),
-        // A 401 here means the cookie was absent or has expired, which is a
-        // signed-out browser rather than a broken one.
         catchError(() => {
-          this.setUser(null);
-          return of(null);
+          if (alreadyKnown) {
+            // The interceptor has already tried its refresh at this 401 (see
+            // above): repeating it here would look like token replay.
+            this.setUser(null);
+            return of(null);
+          }
+
+          // The access token may simply have expired while the refresh token is
+          // still good. `refresh()` sets the user itself on either outcome, so
+          // there is nothing further to record here.
+          return from(this.refresh());
         }),
       ),
     ).then((user) => {
@@ -496,19 +563,114 @@ export class AuthService {
   }
 
   /**
-   * Marks the session gone.
-   *
-   * The bootstrap promise is cleared as well as the user: it resolved to "signed
-   * out", and holding onto that answer would make the next guard that asks bounce
-   * straight to the sign-in screen without ever re-checking a cookie that may since
-   * have arrived.
-   */
+    * Marks the session gone.
+    *
+    * The bootstrap promise is cleared as well as the user: it resolved to "signed
+    * out", and holding onto that answer would make the next guard that asks bounce
+    * straight to the sign-in screen without ever re-checking a cookie that may since
+    * have arrived.
+    *
+    * The cached user follows the live one in both directions: remembered on the
+    * way in so the next load starts from the right answer, forgotten on the way
+    * out so a signed-out browser never replays somebody into a session.
+    */
   private setUser(user: UserDto | null): void {
     this.userState.set(user);
     this.statusState.set(user ? 'authenticated' : 'anonymous');
 
-    if (!user) {
+    if (user) {
+      this.persistCachedUser(user);
+    } else {
       this.bootstrapPromise = null;
+      this.clearCachedUser();
+    }
+  }
+
+  /**
+    * Remembers who signed in, in this browser's own storage.
+    *
+    * Browser-only and failure-silent: storage can be unavailable (private modes,
+    * disabled cookies-adjacent settings), and the session still works for the
+    * page's lifetime without it — the next load simply checks the server instead
+    * of starting from the answer.
+    */
+  private persistCachedUser(user: UserDto): void {
+    if (!this.isBrowser) {
+      return;
+    }
+
+    try {
+      localStorage.setItem(SESSION_CACHE_KEY, JSON.stringify(user));
+    } catch {
+      // The session is in the cookies and works regardless; only the fast
+      // restart is lost.
+    }
+  }
+
+  /** Forgets the remembered user, if any. */
+  private clearCachedUser(): void {
+    if (!this.isBrowser) {
+      return;
+    }
+
+    try {
+      localStorage.removeItem(SESSION_CACHE_KEY);
+    } catch {
+      // Nothing to do: the entry is either gone or unreadable, both of which
+      // read as "no memory".
+    }
+  }
+
+  /**
+    * Who the last load left signed in, if that memory parses.
+    *
+    * Validated rather than trusted: anything that is not exactly a user — a
+    * half-write, a value from an older shape, somebody else's key — reads as no
+    * memory and is dropped, so a corrupt entry can never sign anybody in, not
+    * even briefly.
+    */
+  private restoreCachedUser(): UserDto | null {
+    if (!this.isBrowser) {
+      return null;
+    }
+
+    let raw: string | null = null;
+
+    try {
+      raw = localStorage.getItem(SESSION_CACHE_KEY);
+    } catch {
+      return null;
+    }
+
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<UserDto> | null;
+
+      if (
+        !parsed ||
+        typeof parsed.id !== 'string' ||
+        typeof parsed.name !== 'string' ||
+        typeof parsed.email !== 'string' ||
+        (parsed.role !== 'admin' && parsed.role !== 'employee')
+      ) {
+        localStorage.removeItem(SESSION_CACHE_KEY);
+
+        return null;
+      }
+
+      return { id: parsed.id, name: parsed.name, email: parsed.email, role: parsed.role };
+    } catch {
+      try {
+        localStorage.removeItem(SESSION_CACHE_KEY);
+      } catch {
+        // Already handling a corrupt entry; a storage that will not even clear
+        // is simply treated as empty from here on.
+      }
+
+      return null;
     }
   }
 

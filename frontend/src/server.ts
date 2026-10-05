@@ -15,14 +15,6 @@ const angularApp = new AngularNodeAppEngine({
 });
 
 /**
- * The routes a signed-out visitor is allowed to be served.
- *
- * Everything else needs a session, so a request for it without one is answered with
- * the sign-in screen rather than with the page. `/register` is here because it is a
- * redirect to `/accept-invite` and answering it directly saves a hop.
- */
-const SIGNED_OUT_ROUTES = new Set(['/login', '/accept-invite', '/register']);
-/**
  * Serve static files from /browser
  *
  * Before the redirect below, and that ordering is load-bearing. The sign-in screen is
@@ -40,35 +32,25 @@ app.use(
 );
 
 /**
- * Sends a visitor with no session to the sign-in screen.
+ * No session redirect here, on purpose.
  *
- * Why this exists rather than leaving it to the route guards: a guard runs in the
- * browser, and by the time it has run the server has already answered with the
- * dashboard's markup. A signed-out visitor would see the app for a moment before
- * being redirected, which is the opposite of what "you have to sign in first" is
- * supposed to mean. Redirecting here means the first response to any protected URL
- * is the sign-in screen itself.
+ * A previous version sent any request without an `ika_access` cookie to
+ * `/login`. That check can never pass in this deployment: the session cookies
+ * are host-only cookies of the API's host, while this server is the app's
+ * host, so the browser never sends them here. Every refresh of a signed-in
+ * page was therefore bounced to the sign-in screen, and the client — whose
+ * `GET /api/auth/me` to the API still carried the cookies — bounced straight
+ * back. That round trip is the refresh flash: a server redirect, not a client
+ * race, which is why waiting longer on the client never fixed it.
  *
- * Why the cookie is only checked for presence, and never verified: this process
- * cannot tell a valid session from a forged one. Verifying the token would mean
- * giving the frontend server the signing key, and anybody who could reach this
- * server could then mint a token for anyone. So this decides which *page* to send
- * and nothing more — it saves a redirect, it is not an authorization. A forged
- * cookie gets the app's empty shell, because every route behind it still refuses to
- * load any data and `authGuard` still sends the browser back to the sign-in screen
- * as soon as it runs.
- *
- * Where they were going is carried along, so signing in continues to that page
- * rather than dropping them on the dashboard.
+ * Verifying the token here instead would need the signing key on this server,
+ * which must never leave the API, and presence alone proves nothing (an
+ * expired access token is present and dead). So this server never decides who
+ * is signed in: the app initializer settles the session before the first
+ * navigation, the guards wait for that answer before redirecting anywhere, and
+ * the shell shows a spinner until it has. No refresh renders the wrong screen
+ * in either direction.
  */
-app.use((req, res, next) => {
-  if (req.headers.cookie?.includes('ika_access=') || SIGNED_OUT_ROUTES.has(req.path)) {
-    next();
-    return;
-  }
-
-  res.redirect(302, `/login?returnUrl=${encodeURIComponent(req.originalUrl)}`);
-});
 
 /**
  * Handle all other requests by rendering the Angular application.

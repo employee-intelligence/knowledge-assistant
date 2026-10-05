@@ -23,6 +23,11 @@ describe('AppComponent', () => {
   let router: Router;
 
   beforeEach(async () => {
+    // A cached session outlives the injector: without this, a sign-in
+    // remembered by one test would settle the next test's auth check before it
+    // begins, and the loading-state assertions would see the routed view.
+    localStorage.clear();
+
     await TestBed.configureTestingModule({
       imports: [AppComponent],
       // The shell renders the sidebar, which reaches the conversation services,
