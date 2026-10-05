@@ -159,4 +159,92 @@ describe('AuthService', () => {
       expect(await settle(settled)).toBeNull();
     });
   });
+
+  describe('initialize', () => {
+    /** Answers the CSRF request the settled check fires on its way out. */
+    const flushCsrf = (): void => {
+      http.expectOne(`${API_BASE_URL}/api/auth/csrf`).flush({ csrf_token: 'test-token' });
+    };
+
+    it('starts uninitialized and settles once the single check answers', async () => {
+      withHint();
+
+      expect(auth.initialized()).toBe(false);
+
+      const pending = auth.initialize();
+      answerWithUser('employee');
+      await pending;
+      flushCsrf();
+
+      expect(auth.initialized()).toBe(true);
+      expect(auth.isAuthenticated()).toBe(true);
+    });
+
+    it('settles without any request when there is plainly no session', async () => {
+      // No hint cookie, so no cookies for `/me` to judge by: firing it anyway
+      // would only log a 401 on every signed-out visit. Skipping the request is
+      // not skipping the check — the answer is already known.
+      await auth.initialize();
+
+      expect(auth.initialized()).toBe(true);
+      expect(auth.status()).toBe('anonymous');
+      http.verify();
+    });
+
+    it('settles as anonymous when the session has expired', async () => {
+      // The stale-hint case: the flag outlives a session revoked elsewhere, so
+      // the check asks and the 401 is the answer. Initialization still settles —
+      // an expired session must release the guards, not hold them forever.
+      withHint();
+
+      const pending = auth.initialize();
+      answerWithNobody();
+      await pending;
+      flushCsrf();
+
+      expect(auth.initialized()).toBe(true);
+      expect(auth.isAuthenticated()).toBe(false);
+    });
+
+    it('asks only once however many callers initialize', async () => {
+      // The app initializer and the first guards all arrive together on a
+      // refresh. A second `GET /api/auth/me` would be a second chance for the
+      // answers to disagree — and the visible symptom would be the refresh
+      // flash this exists to remove.
+      withHint();
+
+      const first = auth.initialize();
+      const second = auth.initialize();
+      answerWithUser('employee');
+      await first;
+      await second;
+      flushCsrf();
+
+      expect(auth.initialized()).toBe(true);
+      http.verify();
+    });
+
+    it('whenInitialized starts the check itself when the initializer did not run', async () => {
+      // The guards cannot assume an initializer ran — tests and future entry
+      // points reach them without one. Waiting on a check nobody started would
+      // hang the navigation forever, so the wait starts it.
+      withHint();
+
+      const pending = auth.whenInitialized();
+      answerWithUser('employee');
+      await pending;
+      flushCsrf();
+
+      expect(auth.initialized()).toBe(true);
+      expect(auth.isAuthenticated()).toBe(true);
+    });
+
+    it('whenInitialized resolves at once once the check has settled', async () => {
+      await auth.initialize();
+
+      // Must neither hang nor ask again: the answer is already in hand.
+      await auth.whenInitialized();
+      http.verify();
+    });
+  });
 });

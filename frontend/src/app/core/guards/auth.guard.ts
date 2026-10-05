@@ -20,6 +20,19 @@ type Decision = boolean | UrlTree;
 async function hasSession(): Promise<boolean> {
   const auth = inject(AuthService);
 
+  // The startup check first. On a full page refresh every signal is back to its
+  // initial value, so reading `isAuthenticated()` before the one `GET
+  // /api/auth/me` resolves sees "no user yet" and answers "signed out" — a race,
+  // not a refusal. The guard queues behind the real response instead, which is
+  // what keeps a refresh from flashing through the sign-in screen. No timeout is
+  // involved: this resolves when the API answers, however fast or slow that is.
+  //
+  // Nothing is asked twice here: `whenInitialized` settles the one check and the
+  // decision reads what it found. Asking again after a failed check would fire a
+  // second `/me` for the answer already in hand — the latch a failure clears is
+  // what makes the retry look necessary, and it is not.
+  await auth.whenInitialized();
+
   // A server render cannot answer this: the cookies are in the browser and a render
   // has neither them nor the answer. This is also what keeps a prerender from
   // blocking on a call that could not succeed.
@@ -30,7 +43,13 @@ async function hasSession(): Promise<boolean> {
   // Asked through the hint-aware path, so a visitor with no session is told so
   // without a request. That matters most on the signed-out screens, where the
   // question is usually answered by the absence of a cookie.
-  await auth.maybeBootstrap();
+  //
+  // Reached only when the startup check left the session still unknown, which it
+  // never does today — `initialize` always settles it — so this is the backstop
+  // for a future check that settles some other way, not a second question.
+  if (auth.status() === 'unknown') {
+    await auth.maybeBootstrap();
+  }
 
   return auth.isAuthenticated();
 }

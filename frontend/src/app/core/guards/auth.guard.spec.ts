@@ -139,6 +139,73 @@ describe('auth guards', () => {
     });
   });
 
+  describe('waiting for the startup check', () => {
+    /** Answers the CSRF request a settled check fires on its way out. */
+    const flushCsrf = (): void => {
+      http
+        .match(`${API_BASE_URL}/api/auth/csrf`)
+        .forEach((request) => request.flush({ csrf_token: 't' }));
+    };
+
+    it('does not decide while the startup check is still in flight', async () => {
+      withSessionHint();
+
+      // The initializer started the single check but the answer has not landed.
+      // A guard that read the signals now would see "no user yet" and send a
+      // signed-in person to the sign-in screen — the refresh flash. It must
+      // queue behind the real response instead.
+      const initializing = TestBed.inject(AuthService).initialize();
+      const result = run(authGuard);
+
+      let settledWith: boolean | UrlTree | undefined;
+      void result.then((allowed) => {
+        settledWith = allowed;
+      });
+
+      // Let every pending microtask run: a guard that decided early would have
+      // resolved to the sign-in screen by now.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settledWith).toBeUndefined();
+
+      answerSession('employee');
+
+      expect(await result).toBe(true);
+      await initializing;
+      flushCsrf();
+      http.verify();
+    });
+
+    it('asks nothing more once the startup check has settled', async () => {
+      withSessionHint();
+
+      const initializing = TestBed.inject(AuthService).initialize();
+      answerSession('employee');
+      await initializing;
+      flushCsrf();
+
+      // The answer is already in hand: the guard decides from it without going
+      // back to the API, so a refresh costs exactly one `/me` however many
+      // guarded routes and guards are involved.
+      expect(await run(authGuard)).toBe(true);
+      http.expectNone(`${API_BASE_URL}/api/auth/me`);
+      http.verify();
+    });
+
+    it('sends an expired session to the sign-in screen, but only on the answer', async () => {
+      withSessionHint();
+
+      const result = run(authGuard);
+
+      // The redirect needs the server's 401: nothing may send the person away
+      // before the check that proves the session is over.
+      answerSession(null);
+
+      expect(redirectedTo(await result)).toContain('/login');
+      flushCsrf();
+      http.verify();
+    });
+  });
+
   describe('adminGuard', () => {
     it('lets an administrator through', async () => {
       withSessionHint();

@@ -72,6 +72,28 @@ export class AuthService {
   private readonly userState = signal<UserDto | null>(null);
   private readonly statusState = signal<AuthStatus>('unknown');
 
+  /**
+   * Whether the one startup auth check has settled.
+   *
+   * Separate from "is somebody signed in" on purpose. `status` starts as
+   * `unknown`, which cannot tell "not checked yet" apart from "checked and
+   * nobody is there" to a reader that only looks at `isAuthenticated()` — and a
+   * guard that reads that during the first `GET /api/auth/me` sees "no user yet"
+   * and sends a signed-in person to the sign-in screen, only for the answer to
+   * land a moment later and send them back. That round trip is the refresh flash:
+   * a race, not a refusal. Nothing may decide on the session until this is true.
+   */
+  private readonly initializedState = signal(false);
+
+  /**
+   * The startup check, shared so every waiter queues behind the same request.
+   *
+   * One promise however many callers: the app initializer starts it and each
+   * guard awaits it, and a second `GET /api/auth/me` would be a second chance
+   * for the answers to disagree.
+   */
+  private initPromise: Promise<void> | null = null;
+
   /** The signed-in person, or null. */
   readonly user = this.userState.asReadonly();
 
@@ -96,6 +118,16 @@ export class AuthService {
    * to be dropped into a chat screen instead.
    */
   readonly landingPath = computed(() => (this.isAdmin() ? '/admin' : '/'));
+
+  /**
+   * Whether the startup auth check has settled. False from page load until the
+   * single `GET /api/auth/me` (or the decision that none is needed) resolves.
+   *
+   * Guards wait on this rather than reading `isAuthenticated()` directly, and
+   * the shell shows a loading state while it is false, so neither the sign-in
+   * screen nor a protected page renders on a guess.
+   */
+  readonly initialized = this.initializedState.asReadonly();
 
   /**
    * The one `GET /api/auth/me` per app load, however many callers ask for it.
@@ -165,6 +197,58 @@ export class AuthService {
     }
 
     return this.bootstrap();
+  }
+
+  /**
+   * Runs the one startup auth check and records that it settled.
+   *
+   * Idempotent: the first caller starts it and every later caller — the app
+   * initializer, each guard, any test — queues behind the same promise, so
+   * there is exactly one `GET /api/auth/me` per page load, however many ask.
+   *
+   * Asked through the hint-aware path, so a visitor with plainly no session
+   * settles without a request, exactly as the guards already did. A skipped
+   * request is not a skipped check: with no cookies there is nothing `/me`
+   * could have answered with, and firing it anyway would only log a 401 on
+   * every signed-out visit.
+   *
+   * Never rejects. A failed check (expired session, unreachable backend) is an
+   * answer — "nobody is signed in" — not a startup failure, and rejecting here
+   * would either hang the router on a promise that never settles or fail the
+   * whole application boot over a session that simply is not there.
+   *
+   * Safe on the server: `maybeBootstrap` resolves without a request there, so
+   * a server render is never held waiting on a call that could not succeed.
+   */
+  initialize(): Promise<void> {
+    if (!this.initPromise) {
+      this.initPromise = this.maybeBootstrap().then(
+        () => undefined,
+        () => undefined,
+      );
+      // Set alongside settlement rather than inside the chain above, so even a
+      // genuinely unexpected throw marks the check done instead of leaving every
+      // guard queued behind it forever.
+      void this.initPromise.finally(() => this.initializedState.set(true));
+    }
+
+    return this.initPromise;
+  }
+
+  /**
+   * Resolves once the startup auth check has settled, starting it if needed.
+   *
+   * The guards call this before deciding anything. In production the app
+   * initializer has already started (usually finished) the check, so this is
+   * free; anywhere the initializer did not run — tests, a future entry point —
+   * this starts the check rather than hanging on one that never will.
+   */
+  whenInitialized(): Promise<void> {
+    if (this.initializedState()) {
+      return Promise.resolve();
+    }
+
+    return this.initialize();
   }
 
   /**

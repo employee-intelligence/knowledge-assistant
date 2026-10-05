@@ -19,6 +19,8 @@ import { scan, startWith } from 'rxjs';
 
 import { ChatSidebarComponent } from './features/chat/components/chat-sidebar/chat-sidebar.component';
 import { LayoutService } from './core/services/layout.service';
+import { AuthService } from './core/services/auth.service';
+import { LoadingIndicatorComponent } from './shared/components/loading-indicator/loading-indicator.component';
 
 /** Elements that can hold focus, used by the drawer's focus trap. */
 const FOCUSABLE_SELECTOR =
@@ -54,7 +56,7 @@ const FOCUSABLE_SELECTOR =
 @Component({
   selector: 'app-root',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [ChatSidebarComponent, RouterOutlet],
+  imports: [ChatSidebarComponent, LoadingIndicatorComponent, RouterOutlet],
   host: {
     '(keydown.tab)': 'onTab($event)',
   },
@@ -119,7 +121,25 @@ const FOCUSABLE_SELECTOR =
         [class.lg:pl-rail]="layout.isRail() && !isPlain()"
         [class.lg:pl-0]="isPlain()"
       >
-        <router-outlet />
+        <!--
+          While the one startup auth check has not settled, neither screen may
+          render: the sign-in screen would be a flash for a signed-in person
+          refreshing, and a protected page would be one for a signed-out visitor
+          deep-linking. The app initializer normally settles this before the
+          first navigation, so this is the backstop for any path that reaches the
+          shell first — it shows a spinner, never a guess.
+        -->
+        @if (!authReady()) {
+          <div
+            class="flex flex-1 items-center justify-center"
+            role="status"
+            aria-label="Checking your session"
+          >
+            <app-loading-indicator label="Checking your session" [showDots]="false" />
+          </div>
+        } @else {
+          <router-outlet />
+        }
       </main>
     </div>
   `,
@@ -127,6 +147,13 @@ const FOCUSABLE_SELECTOR =
 export class AppComponent {
   /** Responsive shell state: breakpoints, collapse preference and drawer. */
   protected readonly layout = inject(LayoutService);
+
+  /**
+   * Whether the startup auth check has settled. While false the shell shows a
+   * spinner instead of the routed view, so no refresh can flash the wrong
+   * screen in either direction.
+   */
+  protected readonly authReady = inject(AuthService).initialized;
 
   private readonly router = inject(Router);
 

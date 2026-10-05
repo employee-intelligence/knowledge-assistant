@@ -4,6 +4,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, provideRouter } from '@angular/router';
 
 import { AppComponent } from './app.component';
+import { AuthService } from './core/services/auth.service';
 
 /** The signed-out screen, which is declared plain in `app.routes.ts`. */
 const PLAIN_ROUTE = { path: 'login', data: { plain: true }, children: [] };
@@ -170,5 +171,32 @@ describe('AppComponent', () => {
     // reserved for something that is not rendered.
     expect(main?.classList).toContain('lg:pl-0');
     expect(main?.classList).not.toContain('lg:pl-sidebar');
+  });
+
+  it('shows a loading state instead of any screen before the auth check settles', async () => {
+    // On a refresh every signal is back to its page-load value, so neither the
+    // sign-in screen nor a protected page may render until the one startup
+    // check answers. The shell shows a spinner rather than a guess, in either
+    // direction.
+    const element = elementOf(await render(''));
+
+    expect(element.querySelector('[role="status"]')?.textContent).toContain(
+      'Checking your session',
+    );
+    expect(element.querySelector('router-outlet')).toBeNull();
+  });
+
+  it('renders the routed view once the auth check settles', async () => {
+    const fixture = await render('');
+
+    // No hint cookie here, so the check settles with no request at all.
+    await TestBed.inject(AuthService).initialize();
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    const element = elementOf(fixture);
+
+    expect(element.querySelector('router-outlet')).toBeTruthy();
+    expect(element.querySelector('[role="status"]')).toBeNull();
   });
 });
