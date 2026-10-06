@@ -1,38 +1,52 @@
-/**
- * Single source for the backend origin. Every HTTP call is built from this
- * constant, so pointing the app at a different deployment is a one-line change.
- *
- * The backend serves CORS with a wildcard origin, so the browser calls it
- * directly and no dev-server proxy is involved.
- *
- * Paths are appended by `ApiService`, which builds them from this origin, so the
- * `/api` prefix that the routes live under is not part of it.
- *
- * THE HOST MUST MATCH THE ONE THE APP IS SERVED FROM, exactly.
- *
- * Not a style point. The session cookies are `SameSite=Lax`, and "site" is decided
- * by the host, so a page at `127.0.0.1:4201` calling `localhost:8099` is a
- * cross-site request and the browser will not attach the cookies to it — sign-in
- * then appears to succeed, the cookies are stored, and every subsequent call comes
- * back 401. The ports are irrelevant; `localhost` and `127.0.0.1` are different
- * hosts and that is enough. The same applies in production, where it decides
- * whether the deployed frontend and the deployed API are one site or two.
- *
- * For local work, use `127.0.0.1` rather than `localhost` on both sides: `ng serve`
- * only permits `127.0.0.1` by default, so a `localhost` page is refused with a 400
- * before any of this matters.
- */
-// The deployed backend on Render. Both services are `*.onrender.com`, so they are
-// the same site and the `SameSite=Lax` session cookies are attached; the backend
-// reflects the origin because `ALLOWED_ORIGINS` is `*`, which is what makes a
-// credentialed cross-origin response acceptable to the browser.
-export const API_BASE_URL = 'https://knowledge-assistant-backend-45ob.onrender.com';
+import { inject } from '@angular/core';
 
-// Local development. The backend runs from `backend/` with
-// `uvicorn app.main:app --host 127.0.0.1 --port 8099`, and its ALLOWED_ORIGINS
-// lists http://localhost:4200. Swap the two lines above to move between them:
-//
-//   export const API_BASE_URL = 'http://localhost:8099';
+import { ConfigService } from './config.service';
+
+/**
+ * Single source for the backend origin. Every HTTP call is built from this, so
+ * pointing the app at a different deployment is a one-line change.
+ *
+ * Empty, which means "the origin this page was served from" — so the API is
+ * reached through the server that serves the app. That is right for a deployment
+ * that can serve its own API, and it is not what this one does: the browser calls
+ * the backend on its own origin, which `public/config.json` names.
+ *
+ * WHY THAT MATTERS, because it is the cause of a failure that looks like a wrong
+ * password.
+ *
+ * The session is two `httpOnly` cookies, and the backend marks them `Secure` in
+ * production. A browser will not store a `Secure` cookie for a page served over
+ * plain http, and it drops it without a word — the sign-in request still answers
+ * `200`, and the next call answers `401`. So running this app locally over http
+ * against a production backend cannot keep a session, on any device. Use the
+ * deployed app for the deployed backend, or run the backend locally too, which
+ * serves its cookies without `Secure`.
+ *
+ * The other half of it is `SameSite`. Cookies are attached based on the *site* a
+ * request goes to, not the origin, and the ports are irrelevant — which is why
+ * `localhost` and `127.0.0.1` are different sites but
+ * `knowledge-assistant-chatbot.onrender.com` and any other `*.onrender.com` are
+ * the same one. Same site is what lets `SameSite=Lax` work, and `Lax` is what
+ * keeps the cookies first-party instead of third-party, which is what Safari and
+ * Chrome are increasingly unwilling to send.
+ *
+ * Set this to an absolute URL only when the API really is elsewhere, and check
+ * that it is the same *site* — same registrable domain — or the cookies will not
+ * survive it on a phone.
+ *
+ * `ConfigService` overrides it at runtime from `config.json`, which is how the
+ * deployed build names its backend without being rebuilt.
+ */
+export const API_BASE_URL = '';
+
+/**
+ * Returns the configured API base URL at runtime, or the default constant when
+ * not in an injection context (e.g., during testing).
+ */
+export function getApiBaseUrl(): string {
+  const config = inject(ConfigService, { optional: true });
+  return config?.getApiBaseUrl() ?? API_BASE_URL;
+}
 
 /**
  * How long a single request may take before it is abandoned.

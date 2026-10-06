@@ -132,9 +132,10 @@ import { formatFileSize } from '../../shared/utils/file-size.util';
         title="Delete this document?"
         [message]="deleteMessage()"
         confirmLabel="Delete"
+        tone="danger"
         (confirmed)="deleteDocument()"
       />
-    } @else {
+    } @else if (auth.lacksAdminAccess()) {
       <app-admin-access-required />
     }
   `,

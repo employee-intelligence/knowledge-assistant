@@ -6,10 +6,9 @@ services:
     name: knowledge-assistant-backend
     runtime: docker
     plan: free
-    # `main` is the repository default but is eight commits behind `develop`,
-    # which is where the work actually is. Without this the backend would be
-    # rebuilt from code that predates the conversations migration.
-    branch: develop
+    # `main` is the repository default. Deploys track it so local,
+    # preview and production all build from the same branch.
+    branch: main
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
 
@@ -74,13 +73,47 @@ services:
       - key: MIN_SCORE
         value: "0.40"
 
-      # The frontend is served from its own origin, not localhost, so the
-      # previous value locked the deployed app out of the API. A wildcard is safe
-      # while the API only serves public document data and requires no cookie
-      # session. If a cookie session is added, this becomes the frontend's exact
-      # origin, which is the hostname Render generated for the service below.
+      # Retrieval is hybrid: vector similarity and BM25 keyword matching, fused.
+      # The two candidate depths are how far each search looks *before* the
+      # fusion, so they are deliberately deeper than the four chunks the generator
+      # finally reads — a chunk outside both top-N cannot reach the fused top-N.
+      # `VECTOR_CANDIDATES` is load-bearing beyond ranking: it is also the window
+      # the keyword half may rescue from, so shrinking it removes candidates rather
+      # than only reordering them. Left unset in the blueprint on purpose: the code
+      # defaults are the tuned values, and repeating them here is a second place
+      # for them to drift.
+      #
+      # `KEYWORD_MIN_SCORE` is a BM25 score, not a similarity. It is not comparable
+      # with `MIN_SCORE` and must not be tuned against it.
+      #
+      # `RECALL_FLOOR` is deliberately NOT a lower `MIN_SCORE`, and the two must not
+      # be merged. On this embedding model the answerable and unanswerable score
+      # ranges overlap (answerable as low as 0.22, unanswerable as high as 0.32), so
+      # no relevance threshold separates them. `RECALL_FLOOR` only applies when
+      # nothing cleared `MIN_SCORE`, and hands those chunks to the generator to rule
+      # on — it never re-ranks a question that already had a real match.
+
+      # The deployed Angular frontend. Listed explicitly (no wildcard) so
+      # credentialed CORS responses carry a concrete `Access-Control-Allow-Origin`
+      # and the CSRF origin check has something real to compare against.
+      #
+      # The browser reaches the API through the frontend's own `/api` proxy rather
+      # than calling this service directly, so this list is no longer what makes
+      # sign-in work. It is still needed, because the proxy forwards the browser's
+      # `Origin` and the CSRF check compares it against the same value.
       - key: ALLOWED_ORIGINS
-        value: "*"
+        value: "https://knowledge-assistant-chatbot-app.onrender.com"
+
+      # Must match the browser's exact origin (`https`, host, no trailing slash).
+      # `localhost` and `127.0.0.1` are different origins; a mismatch shows up as
+      # a 403 on state-changing calls, not as a CORS error.
+      - key: CSRF_TRUSTED_ORIGINS
+        value: "https://knowledge-assistant-chatbot-app.onrender.com"
+
+      # Where invitation links point. The backend default is localhost, which is
+      # useless once deployed.
+      - key: FRONTEND_BASE_URL
+        value: "https://knowledge-assistant-chatbot-app.onrender.com"
 
       # Neon, set in the Render dashboard. This service no longer provisions a
       # database of its own, so local and deployed run against the same Neon
@@ -99,7 +132,7 @@ services:
     # than assuming it.
     runtime: node
     plan: free
-    branch: develop
+    branch: main
     rootDir: frontend
     buildCommand: npm ci && npm run build
     startCommand: npm run serve:ssr:frontend
@@ -110,3 +143,31 @@ services:
       # so it is not declared here.
       - key: NODE_VERSION
         value: "24"
+
+      # NODE_ENV must NOT be set to production on this service.
+      #
+      # It breaks the build. npm skips devDependencies when NODE_ENV=production, the
+      # Angular CLI is a devDependency, so the install quietly removes it and the
+      # build then fails with `sh: 1: ng: not found` — which says nothing about the
+      # cause. `scripts/check_build_env.mjs` runs before the build and names it, but
+      # the fix is to leave NODE_ENV unset: nothing in this server needs it, since
+      # API_ORIGIN is read directly.
+      #
+      # It is worth stating because setting it is a reasonable-looking thing to do on
+      # a Node service, and it was set here to make a missing API_ORIGIN a loud error
+      # instead of a silent fallback to localhost.
+
+      # Where the API is. This server answers `/api` itself, forwarding to the
+      # backend named here — which is what `config.json` (set to "") asks for.
+      #
+      # It is what makes sign-in work on a phone as well as on a laptop, and the
+      # reason is a cookie rather than a line of code. The session is two `httpOnly`
+      # cookies, and the browser decides whether to attach them from the site the
+      # request goes to. Have the browser call the backend on its own origin and
+      # those cookies are third-party, so Safari and Chrome apply their
+      # third-party cookie policies to them — per browser, per device, with nothing
+      # in the app to account for the difference. Routed through this server, the
+      # API is on the same origin as the page and the cookies are first-party by
+      # construction, so there is no longer a browser decision to get wrong.
+      - key: API_ORIGIN
+        value: "https://knowledge-assistant-chatbot.onrender.com"

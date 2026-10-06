@@ -6,7 +6,6 @@ import { map } from 'rxjs';
 import { ChatService } from '../../core/services/chat.service';
 import { QuestionInputComponent } from '../../features/ask/components/question-input/question-input.component';
 import { ViewHeaderComponent } from '../../features/chat/components/view-header/view-header.component';
-import { AnswerPendingComponent } from '../../features/response/components/answer-pending/answer-pending.component';
 import { ChatThreadComponent } from '../../features/response/components/chat-thread/chat-thread.component';
 import { SkeletonComponent } from '../../shared/components/skeleton/skeleton.component';
 
@@ -23,7 +22,6 @@ import { SkeletonComponent } from '../../shared/components/skeleton/skeleton.com
   selector: 'app-response-view',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
-    AnswerPendingComponent,
     ChatThreadComponent,
     QuestionInputComponent,
     SkeletonComponent,
@@ -36,26 +34,39 @@ import { SkeletonComponent } from '../../shared/components/skeleton/skeleton.com
     <app-view-header [title]="chat.threadTitle()" />
 
     @if (chat.isResolving()) {
-      <!-- A conversation is on its way, so the placeholder is shaped like one: the
-           question that was asked above the answer card that is arriving. This is
-           the same skeleton a pending answer uses, because a refresh and a slow
-           answer are the same wait from the reader's side. Nothing here is a real
-           message, so it is hidden from assistive tech and the live region says
-           what is happening once. -->
-      <div class="mx-auto w-full max-w-thread flex-1 space-y-5 px-4 py-6 sm:px-6 lg:px-8">
-        <!--
-          Shaped from MessageBubbleComponent: the same rounded-br-sm corner, the same
-          padding, and a bar the height of one line of body text. The old placeholder
-          used the top-right corner and a muted fill, so the real bubble arrived with a
-          different shape and a different colour and the page visibly corrected itself.
-        -->
-        <div class="flex justify-end" aria-hidden="true">
-          <div class="max-w-[320px] rounded-lg rounded-br-sm bg-primary/15 px-4 py-3">
-            <app-skeleton class="h-5 w-full rounded bg-primary/25" />
+      <!--
+        A conversation is on its way. Skeleton cards in the shape of the thread,
+        not a spinner: this is a stored thread being read back, and it arrives as
+        cards, so the placeholders are cards. Nothing here is being thought up,
+        so thinking bubbles would claim work that is not happening.
+      -->
+      <div class="mx-auto w-full max-w-thread flex-1 px-4 py-6 sm:px-6 lg:px-8" aria-hidden="true">
+        <div class="flex flex-col gap-5">
+          <div class="flex justify-end">
+            <app-skeleton class="h-10 w-44 rounded-2xl sm:w-56" />
+          </div>
+
+          <div class="rounded-lg border border-border bg-card p-4">
+            <app-skeleton class="h-3.5 w-40" />
+            <app-skeleton class="mt-2.5 h-2.5 w-full" />
+            <app-skeleton class="mt-1.5 h-2.5 w-11/12" />
+            <app-skeleton class="mt-1.5 h-2.5 w-3/5" />
+            <div class="mt-3 flex gap-1.5">
+              <app-skeleton class="h-5 w-20 rounded-full" />
+              <app-skeleton class="h-5 w-24 rounded-full" />
+            </div>
+          </div>
+
+          <div class="flex justify-end">
+            <app-skeleton class="h-10 w-32 rounded-2xl sm:w-44" />
+          </div>
+
+          <div class="rounded-lg border border-border bg-card p-4">
+            <app-skeleton class="h-3.5 w-32" />
+            <app-skeleton class="mt-2.5 h-2.5 w-full" />
+            <app-skeleton class="mt-1.5 h-2.5 w-2/3" />
           </div>
         </div>
-
-        <app-answer-pending />
       </div>
 
       <span class="sr-only" role="status">Loading this conversation.</span>
@@ -69,21 +80,16 @@ import { SkeletonComponent } from '../../shared/components/skeleton/skeleton.com
           This conversation is not in this browser's list. It may have been deleted.
         </p>
       </div>
-    } @else if (chat.isEmpty()) {
-      <!-- An empty conversation is one waiting for a question, which is a different
-           thing from a conversation that could not be found. -->
-      <div class="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <h2 class="font-headings text-lg font-semibold text-foreground">No questions yet</h2>
-        <p class="max-w-sm text-sm leading-relaxed text-muted-foreground">
-          Ask a question about company policy and the answer will appear here.
-        </p>
-      </div>
     } @else {
+      <!-- The thread, empty or not. A conversation waiting for its first
+           question shows the composer and nothing else: there is no page to show
+           for nothing asked yet. -->
       <app-chat-thread
         [messages]="chat.messages()"
         [isBusy]="chat.isLoading()"
-        [isPreparing]="chat.isPreparing()"
+        [canEdit]="!chat.isLoading()"
         (retry)="onRetry($event)"
+        (edited)="onEdited($event)"
       />
     }
 
@@ -134,5 +140,16 @@ export class ResponseViewComponent {
   /** Asks a failed message's question again. */
   protected onRetry(messageId: string): void {
     this.chat.retry(messageId);
+  }
+
+  /**
+   * Corrects a question and asks it again.
+   *
+   * The service owns the sequence — store the correction, drop the answer written for
+   * the old wording, ask the new one — because getting that order wrong would leave
+   * the thread showing an answer to words that are no longer on screen.
+   */
+  protected onEdited(edit: { id: string; content: string }): void {
+    this.chat.editQuestion(edit.id, edit.content);
   }
 }

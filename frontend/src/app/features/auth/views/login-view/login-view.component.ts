@@ -8,6 +8,7 @@ import { IconComponent } from '../../../../shared/components/icon/icon.component
 import { COMPANY_EMAIL_DOMAIN, isCompanyEmail } from '../../../../core/models/auth.model';
 import { AuthService } from '../../../../core/services/auth.service';
 import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.component';
+import { GENERIC_REFUSAL, readRefusalOr } from '../../utils/read-backend-refusal';
 
 /**
  * Key the remembered work email is kept under.
@@ -18,6 +19,9 @@ import { AuthLayoutComponent } from '../../components/auth-layout/auth-layout.co
  * losing it means retyping it every morning.
  */
 const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
+
+/** Routes that are only useful before a session exists. */
+const SIGNED_OUT_ROUTES = new Set(['/login', '/register', '/accept-invite', '/pending-approval']);
 
 /**
  * The signed-out landing screen: collects a work email and a password and asks the
@@ -47,9 +51,7 @@ const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
   template: `
     <app-auth-layout>
       <h1 class="text-center font-headings text-xl font-semibold text-foreground">Sign in</h1>
-      <p class="mt-1 text-center text-sm text-muted-foreground">
-        Use your {{ companyDomain }} work email to reach the knowledge base.
-      </p>
+      <p class="mt-1 text-center text-sm text-muted-foreground">Sign in to get started</p>
 
       <form class="mt-6 flex flex-col gap-4" [formGroup]="form" (ngSubmit)="onSubmit()">
         <app-form-field
@@ -109,10 +111,36 @@ const REMEMBERED_EMAIL_KEY = 'knowledge-assistant.remembered-email';
         </p>
       }
 
-      <p class="mt-6 border-t border-border pt-4 text-center text-sm text-muted-foreground">
-        Don&apos;t have an account?
-        <a routerLink="/register" class="font-medium text-primary hover:underline">Create one</a>
-      </p>
+      <!--
+        One line, under the form.
+
+        Stacked, these were three short lines in a centred column, which read as a
+        footnote rather than as part of the form. On one line they read as one
+        question with one answer, which is all they are.
+
+        The invitation link is not here. Somebody who was invited already knows they
+        were, and it reached them by a link an administrator sent; putting it beside
+        "no account yet" invited a second question for the person who had just been
+        told the answer.
+      -->
+      <!--
+        Centred by the box, not by 'text-align'.
+
+        'text-center' centres whatever is inline inside it and nothing else, so the
+        two halves lined up only for as long as they stayed inline — and the moment
+        either became a block, or the row wrapped on a narrow screen, the question and
+        the answer drifted apart to opposite edges. A centred flex row positions the
+        two together whatever they are, and wraps as one unit rather than separating.
+      -->
+      <div
+        class="mt-6 flex flex-wrap items-center justify-center gap-x-1.5 border-t
+          border-border pt-4 text-sm text-muted-foreground"
+      >
+        <span>Don't have an account?</span>
+        <a routerLink="/register" class="font-medium text-primary hover:underline">
+          Create an account
+        </a>
+      </div>
     </app-auth-layout>
   `,
 })
@@ -237,9 +265,56 @@ export class LoginViewComponent {
     this.isSubmitting.set(true);
 
     this.auth.login(this.form.controls.email.value, this.form.controls.password.value).subscribe({
-      next: () => {
-        this.isSubmitting.set(false);
-        void this.router.navigateByUrl(this.returnUrl());
+      next: (user) => {
+        // `null` is the server's "your password was right and an administrator has to
+        // approve this account". A separate screen, because nothing is wrong and a 401
+        // here would send somebody to reset a password that is fine.
+        if (user === null) {
+          this.isSubmitting.set(false);
+          void this.router.navigate(['/pending-approval']);
+
+          return;
+        }
+
+        // Proved before navigating: a correct password is not yet a usable
+        // session, because the session lives in cookies the browser has to keep.
+        // When it does not keep them, navigating in anyway ends seconds later
+        // back on this screen with nothing said — so the check happens here,
+        // where the reason can still be named. A check that never answers is a
+        // backend that cannot be reached, not a session that failed, and the
+        // guards and the data calls ahead say that plainer than this screen can.
+        this.auth.verifySession().subscribe({
+          next: (persists) => {
+            this.isSubmitting.set(false);
+
+            if (persists) {
+              void this.router.navigate([this.returnUrl()]);
+
+              return;
+            }
+
+            this.auth.clear();
+
+            // Named for what it usually is, because "allow cookies" is the right
+            // advice for a browser refusing to store them and useless for every
+            // other way of arriving here — and the reader cannot tell which they
+            // are looking at. The address is called out because it is the one cause
+            // nobody suspects: a `Secure` cookie is dropped without a word by a
+            // browser on a plain-http page, which is what running the app locally
+            // against a production backend amounts to.
+            this.notice.set(
+              'You signed in, but this browser did not keep the session. This is ' +
+                'usually cookies being blocked — check that cookies are allowed for ' +
+                'this site — and it also happens if this page was opened over http ' +
+                'rather than https, because the session cookie is only stored on a ' +
+                'secure connection. Sign in again once that is sorted.',
+            );
+          },
+          error: () => {
+            this.isSubmitting.set(false);
+            void this.router.navigate([this.returnUrl()]);
+          },
+        });
       },
       error: (error: unknown) => {
         this.isSubmitting.set(false);
@@ -276,18 +351,37 @@ export class LoginViewComponent {
    * is a path on this site — an absolute one would let a crafted link bounce
    * somebody off to somewhere else after they had signed in.
    *
-   * The fallback is the landing path rather than a hardcoded `/`, so an
-   * administrator arrives on the dashboard and an employee on the assistant without
-   * this screen having to know the difference.
+   * Administrators always land on the dashboard: it is their home, with the figures
+   * and the queue, and the assistant stays one click away on Ask. A return address
+   * would drop them into a chat screen instead, past the very overview that tells
+   * them what needs doing.
+   *
+   * The fallback is the landing path rather than a hardcoded `/`, so an employee
+   * still lands on the assistant without this screen having to know the difference.
    */
   private returnUrl(): string {
+    if (this.auth.isAdmin()) {
+      return this.auth.landingPath();
+    }
+
     const requested = this.route.snapshot.queryParamMap.get('returnUrl');
 
-    if (requested && requested.startsWith('/') && !requested.startsWith('//')) {
+    if (
+      requested &&
+      requested.startsWith('/') &&
+      !requested.startsWith('//') &&
+      !this.isSignedOutRoute(requested)
+    ) {
       return requested;
     }
 
     return this.auth.landingPath();
+  }
+
+  private isSignedOutRoute(path: string): boolean {
+    const cleanPath = path.split(/[?#]/, 1)[0].replace(/\/+$/, '') || '/';
+
+    return SIGNED_OUT_ROUTES.has(cleanPath);
   }
 }
 
@@ -298,6 +392,11 @@ export class LoginViewComponent {
  * purpose, so that it cannot be used to find out who has an account. A 429 means
  * the attempt limit was reached, which is worth saying plainly because the reader
  * did nothing wrong and the fix is to wait.
+ *
+ * A correct password on an account that is still waiting for approval never reaches
+ * this function: the backend answers that with its own `202` and its own payload, and
+ * the caller navigates to the waiting screen. A refusal here means the sign-in really
+ * was refused.
  */
 function readSignInFailure(error: unknown): string {
   const status = (error as { status?: number } | null)?.status;
@@ -309,8 +408,32 @@ function readSignInFailure(error: unknown): string {
     return 'Could not reach the server. Please check your connection and try again.';
   }
   if (status === 422) {
-    return 'That email address is not one this workspace accepts.';
+    // What the backend said, which for a sign-in means a malformed address or a
+    // password the policy refuses. Naming the email here would be wrong: the address
+    // is only one of the two fields that can be refused.
+    return readRefusalOr(error, GENERIC_REFUSAL);
   }
 
-  return 'That email and password do not match an account.';
+  if (status === 401 || status === 403) {
+    return 'That email and password do not match an account.';
+  }
+
+  // That message is said **only** for the statuses that mean the credentials were
+  // refused. It used to be the fall-through for everything else, so a backend that fell
+  // over answered a correct email and password with "that email and password do not
+  // match an account" — the reader then blames the one thing that was fine, resets a
+  // perfectly good password, and is refused again once the backend recovers.
+  if (typeof status === 'number' && status >= 500) {
+    // Deliberately NOT the server's own `detail`, unlike the case below. A 5xx body
+    // holds whatever the backend was carrying when it broke — the exception's type and
+    // message, a connection string, a query — and none of it was written for a reader.
+    // Passing it through hands over the shape of the internals and tells the person in
+    // front of the screen nothing they can act on.
+    return 'Something went wrong signing you in. Please try again in a moment.';
+  }
+
+  // Anything else here is a refusal the backend did write for somebody to read — a
+  // route that has moved, a body in an unexpected shape — so its own wording is more
+  // use than any sentence chosen in this file.
+  return readRefusalOr(error, 'Sign-in could not be completed. Please try again.');
 }

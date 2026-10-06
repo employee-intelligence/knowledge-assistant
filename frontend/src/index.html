@@ -15,21 +15,6 @@
     <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
   </head>
   <body>
-    <!--
-      Shown until Angular boots. The app initializer settles the session before
-      the first navigation, which costs one API round trip on a refresh — this
-      keeps that window from being a blank page. Replaced on bootstrap, and only
-      ever seen that early: the shell owns the loading state from then on.
-    -->
-    <app-root>
-      <div
-        style="display: flex; min-height: 100dvh; align-items: center; justify-content: center;
-          background: #0a1e2b; color: #b8c7d2; font-family: system-ui, sans-serif; font-size: 14px;"
-        role="status"
-        aria-label="Loading"
-      >
-        Checking your session…
-      </div>
-    </app-root>
+    <app-root></app-root>
   </body>
 </html>

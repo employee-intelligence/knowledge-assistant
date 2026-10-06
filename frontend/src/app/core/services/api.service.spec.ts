@@ -93,11 +93,88 @@ describe('ApiService', () => {
       ]);
     });
 
+    it('reads each stored outcome back as itself', async () => {
+      let thread: ConversationThread | undefined;
+
+      api.getConversation('conv-1', CLIENT).subscribe((value) => (thread = value));
+
+      // Four replies that all cite nothing. Only the recorded outcome tells a
+      // greeting from a refusal from a genuine gap, so a thread reopened tomorrow
+      // draws the same cards it did while it was being answered.
+      http.expectOne(`${API_BASE_URL}/api/conversations/conv-1?client_id=${CLIENT}`).flush({
+        id: 'conv-1',
+        title: null,
+        messages: [
+          { id: 'm1', role: 'user', content: 'Hello', sources: null, status: null, confidence: null, created_at: '2026-09-30T09:00:00' },
+          { id: 'm2', role: 'assistant', content: "Hello! I'm the assistant.", sources: null, status: 'greeting', confidence: null, created_at: '2026-09-30T09:00:01' },
+          { id: 'm3', role: 'assistant', content: 'Confidential.', sources: null, status: 'restricted', confidence: null, created_at: '2026-09-30T09:00:02' },
+          { id: 'm4', role: 'assistant', content: "I couldn't find that.", sources: null, status: 'not-found', confidence: null, created_at: '2026-09-30T09:00:03' },
+          { id: 'm5', role: 'assistant', content: "That isn't something I cover.", sources: null, status: 'out-of-scope', confidence: null, created_at: '2026-09-30T09:00:04' },
+        ],
+      });
+
+      // The out-of-scope one is here because it is the case most easily lost: it
+      // cites nothing, like the other three, and reading it as "not-found" claims
+      // a gap in the documents on a question that never was one.
+      expect(thread?.messages.map((message) => message.status)).toEqual([
+        'answered',
+        'greeting',
+        'restricted',
+        'not-found',
+        'out-of-scope',
+      ]);
+    });
+
+    it('reads the confidence the backend derived from the citations', async () => {
+      let thread: ConversationThread | undefined;
+
+      api.getConversation('conv-1', CLIENT).subscribe((value) => (thread = value));
+
+      http.expectOne(`${API_BASE_URL}/api/conversations/conv-1?client_id=${CLIENT}`).flush({
+        id: 'conv-1',
+        title: null,
+        messages: [
+          {
+            id: 'm1',
+            role: 'assistant',
+            content: 'Twenty days.',
+            sources: [SOURCE],
+            status: 'answered',
+            confidence: 8,
+            created_at: '2026-09-30T09:00:00',
+          },
+        ],
+      });
+
+      expect(thread?.messages[0].confidence).toBe(8);
+    });
+
+    it('reads a row stored before outcomes were recorded as before', async () => {
+      let thread: ConversationThread | undefined;
+
+      api.getConversation('conv-1', CLIENT).subscribe((value) => (thread = value));
+
+      // No status on the row. The citations are all the evidence there is, so an
+      // ungrounded answer falls back to the not-found card and a grounded one to the
+      // answer card. These threads are old, and this is the best that can be said
+      // about them.
+      http.expectOne(`${API_BASE_URL}/api/conversations/conv-1?client_id=${CLIENT}`).flush({
+        id: 'conv-1',
+        title: null,
+        messages: [
+          { id: 'm1', role: 'assistant', content: 'Twenty days.', sources: [SOURCE], created_at: '2026-09-30T09:00:00' },
+          { id: 'm2', role: 'assistant', content: "I couldn't find that.", sources: null, created_at: '2026-09-30T09:00:01' },
+        ],
+      });
+
+      expect(thread?.messages.map((message) => message.status)).toEqual(['answered', 'not-found']);
+    });
+
     it('escapes both the conversation id and the client id', () => {
-      api.getConversation('a/b?c', 'client id&x').subscribe();
+      api.getConversation('a/b?c', CLIENT).subscribe();
 
       http
-        .expectOne(`${API_BASE_URL}/api/conversations/a%2Fb%3Fc?client_id=client%20id%26x`)
+        .expectOne(`${API_BASE_URL}/api/conversations/a%2Fb%3Fc?client_id=${CLIENT}`)
         .flush({ id: 'a/b?c', title: null, messages: [] });
     });
 

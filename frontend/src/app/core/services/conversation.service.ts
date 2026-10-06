@@ -13,7 +13,7 @@ import { Observable, ReplaySubject, catchError, map, of, shareReplay, tap } from
 
 import { toDateBucket, type DateBucket } from '../../shared/utils/format-date.util';
 import { Conversation } from '../models/conversation.model';
-import { Message } from '../models/message.model';
+import { Message, ResolvedAnswer } from '../models/message.model';
 import { ApiError, ApiService } from './api.service';
 import { AuthService, type AuthStatus } from './auth.service';
 import { IdentityService } from './identity.service';
@@ -86,6 +86,16 @@ export class ConversationService {
    */
   private pendingCreate: Observable<Conversation> | null = null;
 
+  /**
+   * Titles that arrived before their conversation is listed.
+   *
+   * A fresh conversation is not added to the sidebar until its first answer
+   * lands, but its title can arrive earlier on the stream. With no row to put it
+   * on yet, the title waits here instead of being dropped, and the answer picks
+   * it up when it lists the conversation.
+   */
+  private readonly pendingTitles = new Map<string, string>();
+
   /** Every conversation, most recently active first. */
   readonly conversations = this.conversationsState.asReadonly();
 
@@ -146,9 +156,20 @@ export class ConversationService {
   /** True when this browser has at least one conversation. */
   readonly hasConversations = computed(() => this.conversationsState().length > 0);
 
-  /** True when a search is active and matched nothing. */
+  /**
+   * True when a search is active and matched nothing.
+   *
+   * Requires there to be something to have matched. With no conversations at all, a
+   * search term matched nothing because there was nothing to match, and the list
+   * would otherwise swap "No conversations yet. Ask one to get started." for "No
+   * conversations match your search." — telling somebody who has not asked anything
+   * yet that their search failed, and offering them nothing to search.
+   */
   readonly hasNoResults = computed(
-    () => this.searchTermState().trim().length > 0 && this.filteredConversations().length === 0,
+    () =>
+      this.searchTermState().trim().length > 0 &&
+      this.conversationsState().length > 0 &&
+      this.filteredConversations().length === 0,
   );
 
   /**
@@ -188,6 +209,11 @@ export class ConversationService {
       // anything else having to ask for it, and disappear again after a sign-out.
       effect(() => this.syncToSession(this.auth.status()));
 
+      // Watching the account is what keeps threads from crossing between accounts
+      // on a shared browser: the id the backend scopes threads by already changed
+      // with it, so anything still on screen belongs to somebody else.
+      effect(() => this.syncToAccount(this.auth.user()?.id ?? null));
+
       return;
     }
 
@@ -200,6 +226,41 @@ export class ConversationService {
     // server's own knowledge and correct for the client, which is about to resolve
     // it. Settling still happens, so anything queueing on `ready()` is released.
     this.markSettled();
+  }
+
+  /** The account the state below was last brought in line with. */
+  private accountSeen: string | null | undefined = undefined;
+
+  /**
+   * Drops everything when the account changes.
+   *
+   * Reads the account rather than the status because signing out and back in as
+   * somebody else passes through the same statuses as staying put, and only the
+   * account says the threads on screen changed hands. Loading is left to the
+   * status sync: a sign-in flips the status and loads from there, so loading
+   * here as well would fetch the same list twice.
+   */
+  private syncToAccount(userId: string | null): void {
+    if (this.accountSeen === undefined) {
+      this.accountSeen = userId;
+
+      return;
+    }
+
+    if (userId === this.accountSeen) {
+      return;
+    }
+
+    this.accountSeen = userId;
+    this.conversationsState.set([]);
+    this.activeIdState.set(null);
+    this.messagesState.set([]);
+    this.missingState.set(null);
+    this.loadingState.set(false);
+    this.threadLoadingState.set(false);
+    // Settled when signed out (there is nothing to load); waiting when signed in
+    // (the status sync's load is on its way).
+    this.loadedState.set(userId === null);
   }
 
   /**
@@ -294,6 +355,12 @@ export class ConversationService {
         // list and the thread come back independently, and opening the most recent
         // here unconditionally would replace the conversation a refresh was showing
         // with a different one, which is the same as losing it.
+        //
+        // Only when the route named one. Landing on the ask screen with no
+        // conversation in the URL is asking for a blank window, and quietly
+        // selecting the newest conversation made its row carry the active colour
+        // while a different — empty — window was on screen. The highlight says
+        // "this is the one you are reading", and on a fresh window none of them is.
         if (this.activeIdState() === null) {
           this.openConversation(mostRecent.id);
         }
@@ -331,11 +398,20 @@ export class ConversationService {
    * yet, and the list is re-read once the answer lands, at which point there is
    * something in it to list.
    *
+   * The search is cleared here, so a filter typed before asking cannot hide the
+   * conversation that was just started: a fresh question asked under an old search
+   * term would otherwise land in a conversation the filter does not match, and the
+   * sidebar would keep showing the filtered list until the search was cleared by
+   * hand. Follow-ups keep the filter — only a new conversation lifts it.
+   *
    * De-duplicated: two callers asking at once share one request, so a double click
    * on "Send" leaves one conversation rather than two.
    */
   createConversation(): Observable<Conversation> {
     if (!this.pendingCreate) {
+      // A new conversation must be visible, whatever the sidebar was filtering.
+      this.clearSearch();
+
       this.pendingCreate = this.api.createConversation(this.identity.clientId()).pipe(
         map((response) => {
           const conversation: Conversation = {
@@ -348,8 +424,9 @@ export class ConversationService {
 
           // Not added to the list. An id alone is not a conversation: with no message
           // in it there is nothing to list, and putting it there would show an
-          // untitled row for as long as the answer took to arrive. `refreshSummaries`
-          // puts it in once the exchange has been recorded.
+          // untitled row for as long as the answer took to arrive.
+          // `upsertAnsweredConversation` puts it in once the exchange has been
+          // recorded.
           this.activeIdState.set(conversation.id);
           this.messagesState.set([]);
 
@@ -369,37 +446,33 @@ export class ConversationService {
   }
 
   /**
-   * Re-reads the list from the backend, leaving the open thread as it is.
+   * Records an answered conversation in the list without refetching it.
    *
-   * Answering a message moves its conversation to the top of the list, which the
-   * backend decides, and the list is ordered by when a conversation was last
-   * active. Following a question up in a conversation from last week has to lift
-   * it to the top of the sidebar as it is answered, not at the next reload.
+   * Re-reading the whole list every time an answer landed rebuilt the sidebar
+   * from under the reader for the sake of one row: scroll position jumped and
+   * every row was replaced, when the only thing that changed was the
+   * conversation just answered. That conversation is by definition the most
+   * recently active one, so it goes to the front with a fresh timestamp and
+   * everything else stays exactly where it was.
    *
-   * A failure here changes nothing: the list already in hand is the one the
-   * backend last confirmed, and replacing it with nothing would take away
-   * conversations that do exist.
+   * A title that arrived before the answer is picked up from the stash; one
+   * arriving after still lands through `applyTitle`, which finds the row here
+   * by then.
    */
-  refreshSummaries(): void {
-    this.api
-      .getConversations(this.identity.clientId())
-      .pipe(
-        catchError((error: unknown) => {
-          console.error('Could not refresh conversations', error);
+  upsertAnsweredConversation(conversationId: string): void {
+    const pending = this.pendingTitles.get(conversationId);
+    this.pendingTitles.delete(conversationId);
 
-          return of<Conversation[] | null>(null);
-        }),
-        takeUntilDestroyed(this.destroyRef),
-      )
-      .subscribe((conversations) => {
-        if (conversations === null) {
-          return;
-        }
+    this.conversationsState.update((conversations) => {
+      const existing = conversations.find((item) => item.id === conversationId);
+      const entry: Conversation = {
+        id: conversationId,
+        title: pending ?? existing?.title ?? null,
+        updatedAt: new Date().toISOString(),
+      };
 
-        this.conversationsState.set(conversations);
-        this.loadingState.set(false);
-        this.loadedState.set(true);
-      });
+      return [entry, ...conversations.filter((item) => item.id !== conversationId)];
+    });
   }
 
   /**
@@ -454,10 +527,18 @@ export class ConversationService {
    *
    * The title is applied wherever the conversation is listed rather than by
    * refetching the list, so the sidebar and the open thread's header are corrected
-   * from the same value at the same moment.
+   * from the same value at the same moment. A conversation with no row yet — a
+   * fresh one whose answer has not landed — has its title stashed instead, and the
+   * answer puts it on the row it adds.
    */
   applyTitle(conversationId: string, title: string): void {
-    this.rememberTitle(conversationId, title);
+    if (this.conversationsState().some((item) => item.id === conversationId)) {
+      this.rememberTitle(conversationId, title);
+
+      return;
+    }
+
+    this.pendingTitles.set(conversationId, title);
   }
 
   /**
@@ -482,6 +563,7 @@ export class ConversationService {
         status: 'answered',
         sources: [],
         documentCount: 0,
+        confidence: null,
       },
       {
         id: `${pairId}-assistant`,
@@ -491,6 +573,7 @@ export class ConversationService {
         status: 'pending',
         sources: [],
         documentCount: 0,
+        confidence: null,
       },
     ]);
 
@@ -510,16 +593,14 @@ export class ConversationService {
    * it. A message that never gets that far is left with none, which is honest: an
    * answer that was interrupted was never shown to be grounded in anything.
    */
-  resolveMessage(
-    messageId: string,
-    answer: { text: string; status: 'answered' | 'not-found'; sources: Message['sources'] },
-  ): void {
+  resolveMessage(messageId: string, answer: ResolvedAnswer): void {
     this.patchMessage(messageId, (message) => ({
       ...message,
       text: answer.text,
       status: answer.status,
       sources: answer.sources,
       documentCount: new Set(answer.sources.map((source) => source.document)).size,
+      confidence: answer.confidence,
     }));
   }
 
@@ -535,6 +616,7 @@ export class ConversationService {
       status: 'failed',
       sources: [],
       documentCount: 0,
+      confidence: null,
     }));
   }
 
@@ -546,12 +628,76 @@ export class ConversationService {
       status: 'pending',
       sources: [],
       documentCount: 0,
+      confidence: null,
     }));
   }
 
   /** The message with an id, or undefined when it is not in the open thread. */
   messageAt(messageId: string): Message | undefined {
     return this.messagesState().find((message) => message.id === messageId);
+  }
+
+  /**
+   * Adds an answer slot under a question that is already on screen.
+   *
+   * `appendExchange` cannot be used for this: it adds a question of its own, and a
+   * corrected question has already been written. The exchange is then a question the
+   * reader can see and an answer arriving under it, which is the pair the thread
+   * renders everywhere else.
+   */
+  appendAnswer(): string {
+    const id = `${newLocalId()}-assistant`;
+
+    this.messagesState.update((messages) => [
+      ...messages,
+      {
+        id,
+        role: 'assistant',
+        text: '',
+        createdAt: new Date().toISOString(),
+        status: 'pending',
+        sources: [],
+        documentCount: 0,
+        confidence: null,
+      },
+    ]);
+
+    return id;
+  }
+
+  /**
+   * Writes a corrected question onto the message already showing it.
+   *
+   * The id is kept, so the thread is not rebuilt around it and the reader's position
+   * in the conversation survives. Only the words change.
+   */
+  applyEdit(messageId: string, content: string): void {
+    this.patchMessage(messageId, (message) => ({ ...message, text: content }));
+  }
+
+  /**
+   * Drops the assistant messages answering one question.
+   *
+   * The mirror of what the backend does when a question is edited, so the thread on
+   * screen matches what was stored without a refetch: the answer to the old wording
+   * is removed, and a follow-up asked after it is left alone.
+   */
+  removeAnswerTo(messageId: string): void {
+    this.messagesState.update((messages) => {
+      const index = messages.findIndex((message) => message.id === messageId);
+
+      if (index === -1) {
+        return messages;
+      }
+
+      let end = index + 1;
+
+      while (end < messages.length && messages[end].role === 'assistant') {
+        end += 1;
+      }
+
+      return [...messages.slice(0, index + 1), ...messages.slice(end)];
+    });
   }
 
   /**
@@ -614,15 +760,23 @@ export class ConversationService {
   }
 
   /**
-   * Deletes a conversation and, if it was the open one, opens another.
+   * Deletes a conversation and, if it was the open one, leaves a fresh window.
    *
-   * Deleting what the user is reading leaves them looking at nothing, so the next
-   * conversation takes its place. When there was only the one, a new one is
-   * created: an empty conversation is a conversation waiting for a question, which
-   * is a better state than a composer with nowhere to send anything.
+   * Deleting what the user is reading used to open the next conversation, or a
+   * blank thread when there was none — a page with a composer pointing at a
+   * conversation that no longer exists. Now the open thread is reset to unsaved
+   * instead, and the caller routes to the assistant entry, which is a page for
+   * starting a new conversation rather than the remains of a deleted one.
+   * Deleting anything else leaves the open thread alone.
    */
   deleteConversation(conversationId: string): void {
+    const wasOpen = this.activeIdState() === conversationId;
+
     this.forget(conversationId);
+
+    if (wasOpen) {
+      this.startUnsaved();
+    }
 
     this.api
       .deleteConversation(conversationId, this.identity.clientId())
@@ -634,23 +788,7 @@ export class ConversationService {
         }),
         takeUntilDestroyed(this.destroyRef),
       )
-      .subscribe(() => {
-        if (this.activeIdState() !== conversationId) {
-          return;
-        }
-
-        const next = this.conversationsState()[0];
-
-        if (next) {
-          this.openConversation(next.id);
-          return;
-        }
-
-        // The last conversation is gone, so there is nothing to open. The composer is
-        // left with an empty thread rather than being given a new conversation to
-        // fill: the next question asked will create one.
-        this.startUnsaved();
-      });
+      .subscribe();
   }
 
   /** Updates the search term shared by the sidebar and the conversations view. */

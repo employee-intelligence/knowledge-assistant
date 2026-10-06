@@ -12,7 +12,8 @@ A few things here cost data integrity when they go wrong, so they are pinned:
   "recent" is about what the user did last, not about some TTL the client has
   to babysit.
 - Only the conversation's owner can read, rename or delete it, and the owner is
-  whoever the client says it is, so another client guessing an id gets a 404.
+  the signed-in account — never anything the caller sends. Another account
+  guessing an id, or sending a `client_id` that happens to match, gets a 404.
 
 The app's own startup builds a LlamaIndex index over the policy documents, which
 needs network access and an embedding key. `TestClient` is used without its
@@ -45,13 +46,14 @@ SOURCE = {
 }
 
 CLIENT_A = "1111-aaaa-1111-aaaa-1111"
-CLIENT_B = "2222-bbbb-2222-bbbb-2222"
 
 
 class StubAssistant:
     """Answers without a model, streaming the answer in two pieces."""
 
-    def ask_stream(self, question: str) -> Iterator[dict]:
+    def ask_stream(
+        self, question: str, history: list[tuple[str, str]] | None = None
+    ) -> Iterator[dict]:
         yield {"type": "status", "stage": "writing"}
         yield {"type": "delta", "text": "Answer "}
         yield {"type": "delta", "text": f"to {question}"}
@@ -228,7 +230,7 @@ class OneConversationPerThreadTest(ConversationTestCase):
         conversation_id = self.new_conversation()
 
         class BrokenAssistant(StubAssistant):
-            def ask_stream(self, question):
+            def ask_stream(self, question, history=()):
                 yield {"type": "delta", "text": "Half an ans"}
                 raise RuntimeError("connection dropped")
 
@@ -249,27 +251,79 @@ class OneConversationPerThreadTest(ConversationTestCase):
 
 
 class OwnershipTest(ConversationTestCase):
-    def test_another_client_cannot_read_a_conversation_it_does_not_own(self):
+    def other_client(self) -> TestClient:
+        """A second signed-in account, with its own cookies, on the same app."""
+        other = User(
+            id="test-employee-2",
+            email=f"second@{settings.email_domain}",
+            name="Kwame Osei",
+            role="employee",
+            password_hash=hash_password("correct-horse-1!"),
+            is_active=True,
+        )
+        self.db.add(other)
+        self.db.commit()
+
+        access_token, _ = create_access_token(other.id, other.role)
+        client = TestClient(main.app)
+
+        for name, value in ((ACCESS_COOKIE, access_token), (CSRF_COOKIE, self.csrf_token)):
+            client.cookies.set(name, value)
+
+        return client
+
+    def test_another_account_cannot_read_a_conversation_it_does_not_own(self):
         conversation_id = self.new_conversation(CLIENT_A)
         self.ask(conversation_id, "How much leave?")
 
-        response = self.client.get(
-            f"/api/conversations/{conversation_id}", params={"client_id": CLIENT_B}
+        response = self.other_client().get(
+            f"/api/conversations/{conversation_id}", params={"client_id": CLIENT_A}
         )
 
         # A missing id and someone else's id answer the same way, so ownership
         # cannot be probed by the shape of the error.
         self.assertEqual(response.status_code, 404, response.text)
 
-    def test_each_client_sees_only_its_own_conversations(self):
+    def test_the_same_client_id_does_not_grant_access_to_another_account(self):
+        # The exact shape of the leak this replaced. `client_id` is still recorded and
+        # still sent by every client, but it decides nothing: both accounts send the
+        # same value and each sees only its own threads.
+        conversation_id = self.new_conversation(CLIENT_A)
+        self.ask(conversation_id, "How much leave?")
+
+        other = self.other_client()
+
+        self.assertEqual(
+            other.get(
+                f"/api/conversations/{conversation_id}", params={"client_id": CLIENT_A}
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            other.get("/api/conversations", params={"client_id": CLIENT_A}).json(),
+            {"conversations": []},
+        )
+
+    def test_each_account_sees_only_its_own_conversations(self):
         mine = self.new_conversation(CLIENT_A)
         self.assertEqual(self.ask(mine, "In mine?").status_code, 200)
 
-        theirs = self.new_conversation(CLIENT_B)
-        # Asked as CLIENT_B, which the ownership check on the endpoint requires. Asking
-        # as the other client is a 404, and an unasked conversation is not listed, so
-        # the status is asserted rather than left to show up as an empty list later.
-        self.assertEqual(self.ask(theirs, "In theirs?", CLIENT_B).status_code, 200)
+        other = self.other_client()
+        response = other.post(
+            "/api/conversations",
+            json={"client_id": CLIENT_A},
+            headers=self.csrf_headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        theirs = response.json()["id"]
+        self.assertEqual(
+            other.post(
+                f"/api/conversations/{theirs}/messages",
+                json={"client_id": CLIENT_A, "content": "In theirs?"},
+                headers=self.csrf_headers(),
+            ).status_code,
+            200,
+        )
 
         self.assertEqual(
             [item["id"] for item in self.client.get(
@@ -278,30 +332,30 @@ class OwnershipTest(ConversationTestCase):
             [mine],
         )
         self.assertEqual(
-            [item["id"] for item in self.client.get(
-                "/api/conversations", params={"client_id": CLIENT_B}
+            [item["id"] for item in other.get(
+                "/api/conversations", params={"client_id": CLIENT_A}
             ).json()["conversations"]],
             [theirs],
         )
 
-    def test_another_client_cannot_delete_a_conversation_it_does_not_own(self):
+    def test_another_account_cannot_delete_a_conversation_it_does_not_own(self):
         conversation_id = self.new_conversation(CLIENT_A)
 
-        response = self.client.delete(
+        response = self.other_client().delete(
             f"/api/conversations/{conversation_id}",
-            params={"client_id": CLIENT_B},
+            params={"client_id": CLIENT_A},
             headers=self.csrf_headers(),
         )
 
         self.assertEqual(response.status_code, 404, response.text)
         self.assertEqual(self.conversations_in_db(), [conversation_id])
 
-    def test_another_client_cannot_rename_a_conversation_it_does_not_own(self):
+    def test_another_account_cannot_rename_a_conversation_it_does_not_own(self):
         conversation_id = self.new_conversation(CLIENT_A)
 
-        response = self.client.patch(
+        response = self.other_client().patch(
             f"/api/conversations/{conversation_id}",
-            json={"client_id": CLIENT_B, "title": "Stolen"},
+            json={"client_id": CLIENT_A, "title": "Stolen"},
             headers=self.csrf_headers(),
         )
 
@@ -629,6 +683,85 @@ class StreamedAnswerTest(ConversationTestCase):
         response = self.ask(conversation_id, "How much leave?")
 
         self.assertEqual(read_events(response.text)[0], {"type": "status", "stage": "writing"})
+
+
+class RecentTurnsTest(ConversationTestCase):
+    """The window of the conversation handed to the assistant on each turn.
+
+    It is what lets a follow-up be recognised as one, so what it contains is part
+    of the HTTP contract rather than an implementation detail.
+    """
+
+    class HistoryRecordingAssistant(StubAssistant):
+        def __init__(self) -> None:
+            self.seen: list = []
+
+        def ask_stream(self, question: str, history=None):
+            self.seen.append(list(history or []))
+            yield from StubAssistant.ask_stream(self, question, history)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.recorder = self.HistoryRecordingAssistant()
+        main.state["assistant"] = self.recorder
+
+    def test_a_first_question_is_answered_with_nothing_before_it(self):
+        conversation_id = self.new_conversation()
+
+        self.ask(conversation_id, "How much leave do I get?")
+
+        self.assertEqual(self.recorder.seen[-1], [])
+
+    def test_the_previous_turn_is_handed_over(self):
+        conversation_id = self.new_conversation()
+
+        self.ask(conversation_id, "How much leave do I get?")
+        self.ask(conversation_id, "and can I carry it over?")
+
+        # The question is not in the window: it is the one being answered, and
+        # asking the assistant to classify a message against a history that
+        # already contains it would be asking whether it is a follow-up of itself.
+        self.assertEqual(
+            self.recorder.seen[-1],
+            [
+                ("user", "How much leave do I get?"),
+                ("assistant", "Answer to How much leave do I get?"),
+            ],
+        )
+
+    def test_the_window_is_bounded_and_oldest_first(self):
+        conversation_id = self.new_conversation()
+
+        for index in range(6):
+            self.ask(conversation_id, f"Question {index}?")
+
+        window = self.recorder.seen[-1]
+
+        self.assertLessEqual(len(window), 4)
+        # Oldest first, so the model reads it as a conversation rather than
+        # backwards, and the newest turn in it is the one before this question.
+        self.assertEqual(window[-1], ("assistant", "Answer to Question 4?"))
+        self.assertEqual(window[0][0], "user")
+
+    def test_another_conversations_messages_are_not_in_the_window(self):
+        first = self.new_conversation()
+        second = self.new_conversation()
+
+        self.ask(first, "A question in the first?")
+        self.ask(second, "A question in the second?")
+        self.ask(second, "A follow-up in the second?")
+
+        # Two threads open in the sidebar must not bleed into each other. Without
+        # the conversation filter, "A follow-up in the second?" would be handed a
+        # window containing the first conversation's question and could be read as
+        # a follow-up to it.
+        self.assertEqual(
+            [text for _, text in self.recorder.seen[-1]],
+            [
+                "A question in the second?",
+                "Answer to A question in the second?",
+            ],
+        )
 
 
 if __name__ == "__main__":

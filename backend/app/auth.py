@@ -16,7 +16,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from jose import JWTError
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
@@ -24,11 +24,14 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import (
     AccessRequest,
+    Conversation,
     Invite,
+    Message,
     RefreshSession,
     User,
     find_open_access_request,
     find_user_by_email,
+    revoke_all_sessions,
     revoke_family,
 )
 from app.dependencies import (
@@ -50,15 +53,21 @@ from app.schemas_auth import (
     AccessRequestSubmittedResponse,
     AcceptInviteRequest,
     BootstrapAdminRequest,
+    ChangeOwnPasswordRequest,
     CreateAccountRequest,
     CsrfResponse,
     InvitePreviewResponse,
     InviteRequest,
     InviteResponse,
-    LoginRequest,
-    StatusResponse,
+LoginRequest,
+PendingApprovalResponse,
+PasswordResetRequest,
+StatusResponse,
     UserDto,
+    UserListResponse,
     UserResponse,
+    UserSummaryDto,
+    UserUpdateRequest,
 )
 from app.security import (
     REFRESH_TOKEN_TYPE,
@@ -90,10 +99,15 @@ REFRESH_COOKIE = "ika_refresh"
 # more way to send somebody an invitation link for somewhere else.
 ACCEPT_INVITE_PATH = "/accept-invite"
 
-# One message for every failed sign-in. Whether the address is unknown, the
-# password is wrong, or the account is still a pending invitation, the answer is
-# the same 401. Splitting them would turn this endpoint into a way to enumerate
-# which company email addresses have accounts.
+# One message for every sign-in that genuinely failed. Whether the address is
+# unknown, the password is wrong, or the invitation has never been accepted, the
+# answer is the same 401. Splitting them would turn this endpoint into a way to
+# enumerate which company email addresses have accounts.
+#
+# What it is *not* used for is a correct password on an account that is merely
+# waiting for approval. That is a `202` with its own payload, below, and it is safe
+# to answer separately precisely because it only goes out once the password has been
+# verified — knowing a password already proves more than the answer would disclose.
 INVALID_CREDENTIALS = "That email and password do not match an account."
 
 # Likewise for invitations: an unknown token, an expired one and a used one are
@@ -110,16 +124,12 @@ def _bearer_cookie_kwargs(max_age: int) -> dict:
 
     `httponly` keeps the value out of reach of JavaScript, which is the single most
     important line here. `secure` stops the browser sending it over plain http, and
-    production forces it on regardless of the setting. `samesite="lax"` rather than
-    `strict` because the invitation is followed from a mail client: `strict` would
-    withhold the cookies on that first top-level navigation, and `lax` still
-    withholds them from every cross-site sub-request, which is the exposure that
-    matters.
+    production forces it on regardless of the setting.
     """
     return {
         "httponly": True,
         "secure": settings.cookies_are_secure,
-        "samesite": "lax",
+        "samesite": settings.cookie_samesite,
         "path": "/",
         "max_age": max_age,
     }
@@ -166,7 +176,7 @@ def set_session_cookies(
         "1",
         httponly=False,
         secure=settings.cookies_are_secure,
-        samesite="lax",
+        samesite=settings.cookie_samesite,
         path="/",
         max_age=settings.refresh_token_ttl_seconds,
     )
@@ -179,11 +189,26 @@ def clear_session_cookies(response: Response) -> None:
     it as a different cookie and leaves the original in place. `max_age=0` is what
     actually deletes one; the empty value is belt to that braces.
     """
-    response.delete_cookie(ACCESS_COOKIE, path="/")
-    response.delete_cookie(REFRESH_COOKIE, path="/")
+    response.delete_cookie(
+        ACCESS_COOKIE,
+        path="/",
+        secure=settings.cookies_are_secure,
+        samesite=settings.cookie_samesite,
+    )
+    response.delete_cookie(
+        REFRESH_COOKIE,
+        path="/",
+        secure=settings.cookies_are_secure,
+        samesite=settings.cookie_samesite,
+    )
     # Cleared with the rest, so signing out does not leave the app believing it is
     # still worth asking about a session.
-    response.delete_cookie(SESSION_HINT_COOKIE, path="/")
+    response.delete_cookie(
+        SESSION_HINT_COOKIE,
+        path="/",
+        secure=settings.cookies_are_secure,
+        samesite=settings.cookie_samesite,
+    )
 
 
 def set_csrf_cookie(response: Response, token: str | None = None) -> str:
@@ -203,7 +228,7 @@ def set_csrf_cookie(response: Response, token: str | None = None) -> str:
         # Readable by script on purpose; see above.
         httponly=False,
         secure=settings.cookies_are_secure,
-        samesite="lax",
+        samesite=settings.cookie_samesite,
         path="/",
         # A session, not a week: it is reissued on every sign-in and every refresh.
         max_age=settings.refresh_token_ttl_seconds,
@@ -222,7 +247,14 @@ def issue_csrf(response: Response) -> CsrfResponse:
     return CsrfResponse(csrf_token=set_csrf_cookie(response))
 
 
-@router.post("/login", response_model=UserResponse)
+@router.post(
+    "/login",
+    response_model=UserResponse | PendingApprovalResponse,
+    responses={
+        401: {"description": "The address or the password is wrong."},
+        202: {"description": "Correct password, but the account is not approved yet."},
+    },
+)
 @limiter.limit(LOGIN_RATE_LIMIT)
 def login(
     request: Request,
@@ -230,32 +262,80 @@ def login(
     req: LoginRequest,
     db: Session = Depends(get_db),
     _csrf: None = Depends(require_csrf),
-) -> UserResponse:
+) -> UserResponse | PendingApprovalResponse:
     """Signs somebody in.
 
     Exempt from CSRF because there is no session yet to have issued a token for.
     What protects it instead is the rate limit, the fact that a forged sign-in needs
     a password the attacker does not have, and `SameSite=Lax` withholding the
     cookies from a cross-site POST so the response cannot be read back.
+
+    Three answers, not two. A session when the account is active and the password is
+    right; `PendingApprovalResponse` when the password is right and the account is
+    **waiting on an administrator**; and one generic `401` for everything else. That
+    middle case used to be folded into the `401`, which was wrong in the only way that
+    reaches a user: it told somebody their password did not match an account when it
+    matched perfectly, and sent them to reset something that was not broken.
+
+    Answering it separately costs no security, because it is sent *only* once the
+    password has verified. Proving you own an account is not information you can hand
+    to somebody who does not, so this cannot be used to find out which addresses have
+    asked to join — the same reason an invitation link can be previewed at all.
     """
     user = find_user_by_email(db, req.email)
 
-    # The hash is verified even when there is no such user, against a fixed dummy,
-    # so that an address with no account takes the same time as one with a wrong
-    # password. Without this, response time alone says which addresses exist.
     if user is None:
+        # Somebody who registered is not in `users` yet — approval writes that row —
+        # so their request is the only thing there is to check the password against.
+        # Found and verified here so a correct sign-in gets the waiting screen rather
+        # than the wrong-password refusal. A wrong password, or no request at all,
+        # falls through to the same `401` an unknown address gets, after the same
+        # dummy verification, so nothing about this branch is visible from outside.
+        open_request = find_open_access_request(db, req.email)
+
+        if open_request is not None and verify_password(
+            req.password, open_request.password_hash
+        ):
+            logger.info("sign-in for %s is waiting on an administrator", req.email)
+            response.status_code = status.HTTP_202_ACCEPTED
+
+            # No role: nobody has decided one yet. The screen says as much rather than
+            # naming one, because an approval carries the role and nothing else does.
+            return PendingApprovalResponse(name=open_request.name)
+
+        # The hash is verified even when there is no such user, against a fixed dummy,
+        # so that an address with no account takes the same time as one with a wrong
+        # password. Without this, response time alone says which addresses exist.
         verify_password(req.password, dummy_password_hash())
         logger.info("sign-in attempt for unknown address %s", req.email)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=INVALID_CREDENTIALS)
 
-    if not user.is_active or not verify_password(req.password, user.password_hash):
+    if user.password_hash is None:
+        # Invited and never accepted: there is no password to have got right, so
+        # nothing here can be verified and nothing may be said about the account.
+        # Verified against the dummy so the time taken matches every other refusal.
+        verify_password(req.password, dummy_password_hash())
+        logger.info("sign-in against a pending invitation for %s", user.email)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=INVALID_CREDENTIALS)
+
+    if not verify_password(req.password, user.password_hash):
         logger.info("failed sign-in for %s", user.email)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=INVALID_CREDENTIALS)
+
+    if not user.is_active:
+        # The password was right, which is the only thing this branch is entitled to
+        # assume: nobody who has not got the password can reach it. Answering with the
+        # waiting screen rather than a refusal is what stops a correct password from
+        # reading as a wrong one.
+        logger.info("sign-in for %s is on an account that is not active", user.email)
+        response.status_code = status.HTTP_202_ACCEPTED
+
+        return PendingApprovalResponse(name=user.name, requested_role=user.role)
 
     # A hash made at a lower cost than the current setting is replaced on the way
     # past, which is the only moment a user has already proved they know the
     # plaintext.
-    if user.password_hash and needs_rehash(user.password_hash):
+    if needs_rehash(user.password_hash):
         user.password_hash = hash_password(req.password)
         db.commit()
 
@@ -405,6 +485,43 @@ def me(current_user: User = Depends(get_current_user)) -> UserDto:
     a reload lands back inside the session rather than back at the sign-in screen.
     """
     return _user_dto(current_user)
+
+
+@router.post("/me/password", response_model=StatusResponse)
+def change_own_password(
+    req: ChangeOwnPasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _csrf: None = Depends(require_csrf),
+) -> StatusResponse:
+    """Changes the signed-in person's own password. Any role.
+
+    The current password is checked first, so a session left open on a shared
+    machine cannot be used to lock its owner out. Every session is revoked with
+    it, exactly as an administrator reset does: the frontend signs out afterwards
+    and the new password is what signs back in.
+    """
+    if not verify_password(req.current_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your current password is not correct.",
+        )
+
+    if verify_password(req.new_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Choose a password you have not used here.",
+        )
+
+    current_user.password_hash = hash_password(req.new_password)
+    current_user.updated_at = datetime.now(timezone.utc)
+
+    revoke_all_sessions(db, current_user.id)
+    db.commit()
+
+    logger.info("user changed their own password for %s", current_user.email)
+
+    return StatusResponse(status="password-changed")
 
 
 def provision_pending_user(
@@ -958,6 +1075,200 @@ def bootstrap_admin(
     logger.info("bootstrapped the first administrator: %s", user.email)
 
     return UserResponse(user=_user_dto(user))
+
+
+# --------------------------------------------------------------------------- #
+# Managing the accounts that exist.                                             #
+# --------------------------------------------------------------------------- #
+
+# How many rows one page of the accounts list carries. Fixed rather than sent by the
+# client so the page size is a decision made once, and so a caller cannot ask for
+# every account in the system in one response.
+USERS_PAGE_SIZE = 10
+
+
+@router.get("/users", response_model=UserListResponse)
+def list_users(
+    page: int = Query(default=1, ge=1),
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> UserListResponse:
+    """Every account, a page at a time, newest first. Administrators only."""
+    total = db.scalar(select(func.count(User.id))) or 0
+    pages = max(1, -(-total // USERS_PAGE_SIZE))
+    current = min(page, pages)
+
+    rows = db.scalars(
+        select(User)
+        .order_by(User.created_at.desc(), User.id)
+        .offset((current - 1) * USERS_PAGE_SIZE)
+        .limit(USERS_PAGE_SIZE)
+    ).all()
+
+    return UserListResponse(
+        users=[
+            UserSummaryDto(
+                id=row.id,
+                name=row.name,
+                email=row.email,
+                role=row.role,
+                is_active=row.is_active,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ],
+        total=total,
+        page=current,
+        per_page=USERS_PAGE_SIZE,
+        pages=pages,
+    )
+
+
+def _user_or_404(db: Session, user_id: str) -> User:
+    user = db.get(User, user_id)
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="That account no longer exists."
+        )
+
+    return user
+
+
+def _refuse_self(target: User, admin: User, action: str) -> None:
+    """Refuses an administrator acting on their own account.
+
+    Deleting, demoting or deactivating yourself ends with nobody able to
+    administer the system, and the bootstrap route is refused once any
+    administrator exists — so in practice the deployment is finished. Refused
+    with a 409 rather than quietly ignored.
+    """
+    if target.id != admin.id:
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"You cannot {action} your own account. Ask another administrator to do it.",
+    )
+
+
+@router.patch("/users/{user_id}", response_model=UserSummaryDto)
+def update_user(
+    user_id: str,
+    req: UserUpdateRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+    _csrf: None = Depends(require_csrf),
+) -> UserSummaryDto:
+    """Corrects an account: name, address, role, or whether it is on.
+
+    Every field is optional and independent. An address change is refused if it
+    is already somebody else's, and acting on your own account the fatal ways is
+    refused by the same guard as deleting it.
+    """
+    user = _user_or_404(db, user_id)
+
+    if req.email is not None and req.email != user.email:
+        clash = find_user_by_email(db, req.email)
+
+        if clash is not None and clash.id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Another account already uses that address.",
+            )
+
+    if req.role is not None and req.role != "admin":
+        _refuse_self(user, admin, "demote")
+
+    if req.is_active is False:
+        _refuse_self(user, admin, "deactivate")
+
+    if req.name is not None:
+        user.name = req.name
+    if req.email is not None:
+        user.email = req.email
+    if req.role is not None:
+        user.role = req.role
+    if req.is_active is not None:
+        user.is_active = req.is_active
+
+    user.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    logger.info("administrator updated %s by %s", user.email, admin.email)
+
+    return UserSummaryDto(
+        id=user.id,
+        name=user.name,
+        email=user.email,
+        role=user.role,
+        is_active=user.is_active,
+        created_at=user.created_at,
+    )
+
+
+@router.delete("/users/{user_id}", response_model=StatusResponse)
+def delete_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+    _csrf: None = Depends(require_csrf),
+) -> StatusResponse:
+    """Removes an account, and everything belonging to it.
+
+    Their conversations go with them rather than being orphaned, and their
+    sessions and invitations with those. From that moment they cannot sign in.
+    """
+    user = _user_or_404(db, user_id)
+    _refuse_self(user, admin, "delete")
+
+    for conversation in db.scalars(
+        select(Conversation).where(Conversation.user_id == user.id)
+    ).all():
+        db.query(Message).filter(Message.conversation_id == conversation.id).delete(
+            synchronize_session=False
+        )
+        db.delete(conversation)
+
+    db.query(RefreshSession).filter(RefreshSession.user_id == user.id).delete()
+    db.query(Invite).filter(Invite.user_id == user.id).delete()
+    db.query(AccessRequest).filter(AccessRequest.email == user.email).delete()
+
+    email = user.email
+    db.delete(user)
+    db.commit()
+
+    logger.info("administrator deleted the account %s", email)
+
+    return StatusResponse(status="deleted")
+
+
+@router.post("/users/{user_id}/password", response_model=StatusResponse)
+def reset_user_password(
+    user_id: str,
+    req: PasswordResetRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+    _csrf: None = Depends(require_csrf),
+) -> StatusResponse:
+    """Sets a new password for somebody locked out of their account.
+
+    Every live session is revoked with it: a password reset that leaves old
+    sessions running resets nothing. The administrator hands the new password
+    over themselves — there is no mail service to deliver a link with.
+    """
+    user = _user_or_404(db, user_id)
+
+    user.password_hash = hash_password(req.password)
+    user.is_active = True
+    user.updated_at = datetime.now(timezone.utc)
+
+    revoke_all_sessions(db, user.id)
+    db.commit()
+
+    logger.info("administrator reset the password for %s", user.email)
+
+    return StatusResponse(status="password-reset")
 
 
 def _usable_invite_or_404(db: Session, token: str) -> Invite:

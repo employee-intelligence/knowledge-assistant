@@ -5,8 +5,6 @@ import { API_BASE_URL } from '../api.config';
 import { AuthService } from './auth.service';
 
 const ME = `${API_BASE_URL}/api/auth/me`;
-const REFRESH = `${API_BASE_URL}/api/auth/refresh`;
-const SESSION_CACHE_KEY = 'ika.session.v1';
 
 describe('AuthService', () => {
   let auth: AuthService;
@@ -21,31 +19,22 @@ describe('AuthService', () => {
     http.expectOne(ME).flush({ id: 'u1', name: 'Ama Konadu', email: 'ama@acmetech.example', role });
   };
 
+  /**
+   * Answers a 401 on `/me`, and the refresh that follows it.
+   *
+   * A 401 on `/me` no longer settles the question by itself. The access cookie is
+   * deliberately short-lived and the refresh cookie outlives it, so one refresh is
+   * tried before the session is called over — and it is that refresh, refused, that
+   * finally means signed out and clears the hint cookie.
+   */
   const answerWithNobody = (): void => {
     http
       .expectOne(ME)
       .flush({ detail: 'Not authenticated' }, { status: 401, statusText: 'Unauthorized' });
-  };
 
-  /**
-   * Answers the single refresh attempt a `GET /api/auth/me` 401 triggers while
-   * nobody is known to be signed in, with a session that is genuinely over.
-   *
-   * Needed because the access token dies after fifteen minutes while the refresh
-   * token lives fourteen days: a 401 alone cannot tell "signed out" from "the
-   * access token ran out", so the service tries once before concluding.
-   */
-  const answerRefreshWithNobody = (): void => {
     http
-      .expectOne(REFRESH)
-      .flush({ detail: 'No active session.' }, { status: 401, statusText: 'Unauthorized' });
-  };
-
-  /** The same attempt, answered with a session that is still alive. */
-  const answerRefreshWithUser = (role: 'employee' | 'admin'): void => {
-    http.expectOne(REFRESH).flush({
-      user: { id: 'u1', name: 'Ama Konadu', email: 'ama@acmetech.example', role },
-    });
+      .expectOne(`${API_BASE_URL}/api/auth/refresh`)
+      .flush({ detail: 'Not authenticated' }, { status: 401, statusText: 'Unauthorized' });
   };
 
   /**
@@ -65,12 +54,9 @@ describe('AuthService', () => {
 
   beforeEach(async () => {
     // `document.cookie` outlives the injector, so a hint left by one test would make
-    // the next one believe it had a session.
+    // the next one believe it had a session. The remembered session in storage
+    // outlives it too, for the same reason.
     document.cookie = 'ika_session=; path=/; max-age=0';
-
-    // The cached user outlives the injector the same way: without this, a sign-in
-    // in one test would make the next test's fresh service believe it was signed
-    // in before asking anybody.
     localStorage.clear();
 
     await TestBed.configureTestingModule({
@@ -146,10 +132,6 @@ describe('AuthService', () => {
 
       const settled = auth.maybeBootstrap();
       answerWithNobody();
-      // The access token's 401 alone cannot say the session is over (it dies in
-      // fifteen minutes, the refresh token in fourteen days), so one refresh is
-      // tried first. Here it is refused too, which is the actual answer.
-      answerRefreshWithNobody();
 
       expect(await settle(settled)).toBeNull();
       expect(auth.status()).toBe('anonymous');
@@ -187,204 +169,193 @@ describe('AuthService', () => {
       // callers that must know rather than guess.
       const settled = auth.bootstrap();
       answerWithNobody();
-      answerRefreshWithNobody();
 
       expect(await settle(settled)).toBeNull();
     });
+  });
 
-    it('heals an expired access token with the refresh token before giving up', async () => {
-      // The refresh-hours-later case: the access token died at fifteen minutes but
-      // the refresh token is still good, so this is a live session, not a signed-out
-      // browser. Concluding "anonymous" on the first 401 would send a signed-in
-      // person to the sign-in screen for nothing.
-      withHint();
+  describe('remembered session', () => {
+    it('asks when a session was established here, even with no readable hint', async () => {
+      // The hint cookie lives on the API's host, which frontend JavaScript can
+      // never read on a cross-site deploy. The remembered flag lives on this
+      // origin instead, so a reload still asks rather than concluding signed out.
+      localStorage.setItem('knowledge-assistant.session', '1');
 
-      const settled = auth.bootstrap();
-      answerWithNobody();
-      answerRefreshWithUser('employee');
+      const settled = auth.maybeBootstrap();
+      answerWithUser('employee');
 
       expect((await settle(settled))?.email).toBe('ama@acmetech.example');
       expect(auth.isAuthenticated()).toBe(true);
     });
-  });
 
-  describe('initialize', () => {
-    /** Answers the CSRF request the settled check fires on its way out. */
-    const flushCsrf = (): void => {
-      http.expectOne(`${API_BASE_URL}/api/auth/csrf`).flush({ csrf_token: 'test-token' });
-    };
+    it('forgets the session with the user, so a later visit asks nobody', async () => {
+      // Models a reload after signing out on a cross-site deploy: no readable
+      // hint cookie (there never is one across sites), only the remembered flag —
+      // which signing out must have removed along with the user.
+      localStorage.setItem('knowledge-assistant.session', '1');
 
-    it('starts uninitialized and settles once the single check answers', async () => {
-      withHint();
-
-      expect(auth.initialized()).toBe(false);
-
-      const pending = auth.initialize();
+      const signedIn = auth.maybeBootstrap();
       answerWithUser('employee');
-      await pending;
-      flushCsrf();
+      await settle(signedIn);
 
-      expect(auth.initialized()).toBe(true);
-      expect(auth.isAuthenticated()).toBe(true);
-    });
+      auth.clear();
 
-    it('settles without any request when there is plainly no session', async () => {
-      // No hint cookie, so no cookies for `/me` to judge by: firing it anyway
-      // would only log a 401 on every signed-out visit. Skipping the request is
-      // not skipping the check — the answer is already known.
-      await auth.initialize();
-
-      expect(auth.initialized()).toBe(true);
-      expect(auth.status()).toBe('anonymous');
-      http.verify();
-    });
-
-    it('settles as anonymous when the session has expired', async () => {
-      // The stale-hint case: the flag outlives a session revoked elsewhere, so
-      // the check asks and the 401 is the answer. Initialization still settles —
-      // an expired session must release the guards, not hold them forever.
-      withHint();
-
-      const pending = auth.initialize();
-      answerWithNobody();
-      answerRefreshWithNobody();
-      await pending;
-      flushCsrf();
-
-      expect(auth.initialized()).toBe(true);
-      expect(auth.isAuthenticated()).toBe(false);
-    });
-
-    it('asks only once however many callers initialize', async () => {
-      // The app initializer and the first guards all arrive together on a
-      // refresh. A second `GET /api/auth/me` would be a second chance for the
-      // answers to disagree — and the visible symptom would be the refresh
-      // flash this exists to remove.
-      withHint();
-
-      const first = auth.initialize();
-      const second = auth.initialize();
-      answerWithUser('employee');
-      await first;
-      await second;
-      flushCsrf();
-
-      expect(auth.initialized()).toBe(true);
-      http.verify();
-    });
-
-    it('whenInitialized starts the check itself when the initializer did not run', async () => {
-      // The guards cannot assume an initializer ran — tests and future entry
-      // points reach them without one. Waiting on a check nobody started would
-      // hang the navigation forever, so the wait starts it.
-      withHint();
-
-      const pending = auth.whenInitialized();
-      answerWithUser('employee');
-      await pending;
-      flushCsrf();
-
-      expect(auth.initialized()).toBe(true);
-      expect(auth.isAuthenticated()).toBe(true);
-    });
-
-    it('whenInitialized resolves at once once the check has settled', async () => {
-      await auth.initialize();
-
-      // Must neither hang nor ask again: the answer is already in hand.
-      await auth.whenInitialized();
+      expect(localStorage.getItem('knowledge-assistant.session')).toBeNull();
+      expect(await auth.maybeBootstrap()).toBeNull();
       http.verify();
     });
   });
 
-  describe('session cache', () => {
-    const cachedUser = {
-      id: 'u1',
-      name: 'Ama Konadu',
-      email: 'ama@acmetech.example',
-      role: 'employee',
+  describe('restoring a session from storage', () => {
+    /**
+     * A service built the way a page load builds it.
+     *
+     * A new injector, because the one under test was constructed before the
+     * snapshot was written — and the whole point of the restore is what the
+     * *constructor* sees, not what a later call can be told.
+     */
+    const freshService = async (): Promise<AuthService> => {
+      TestBed.resetTestingModule();
+
+      await TestBed.configureTestingModule({ providers: [provideHttpClientTesting()] });
+
+      return TestBed.inject(AuthService);
     };
 
-    /** A previous visit's memory, as `setUser` would have written it. */
-    const seedCache = (): void => {
-      localStorage.setItem(SESSION_CACHE_KEY, JSON.stringify(cachedUser));
-    };
+    const snapshot = { id: 'u1', name: 'Ama Konadu', email: 'ama@acmetech.example', role: 'admin' };
 
-    it('remembers who signed in, so the next load starts from the answer', async () => {
+    it('knows who is signed in before any request is made', async () => {
+      // The sign-in screen appearing for a frame on every refresh is what this
+      // prevents: the guards may render immediately because the answer is already
+      // here, rather than waiting a round trip to be told what they can see.
+      localStorage.setItem('knowledge-assistant.user', JSON.stringify(snapshot));
+
+      const restored = await freshService();
+
+      expect(restored.isAuthenticated()).toBe(true);
+      expect(restored.user()?.name).toBe('Ama Konadu');
+      expect(restored.isAdmin()).toBe(true);
+    });
+
+    it('revalidates it, rather than trusting the snapshot', async () => {
+      // The snapshot decides what to paint and nothing else. A session revoked
+      // elsewhere has to end on this tab too, which only asking can establish.
+      localStorage.setItem('knowledge-assistant.user', JSON.stringify(snapshot));
+
+      const restored = await freshService();
+      const revalidated = TestBed.inject(HttpTestingController);
+
+      const pending = restored.maybeBootstrap();
+
+      revalidated
+        .expectOne(ME)
+        .flush({ detail: 'Not authenticated' }, { status: 401, statusText: 'Unauthorized' });
+      revalidated
+        .expectOne(`${API_BASE_URL}/api/auth/refresh`)
+        .flush({ detail: 'Not authenticated' }, { status: 401, statusText: 'Unauthorized' });
+
+      expect(await pending).toBeNull();
+      expect(restored.isAuthenticated()).toBe(false);
+      expect(localStorage.getItem('knowledge-assistant.user')).toBeNull();
+    });
+
+    it('ignores a snapshot it cannot make sense of', async () => {
+      // Storage is writable by anything on this origin, so a mangled entry has to
+      // read as "nothing remembered" rather than as a half-built user.
+      localStorage.setItem('knowledge-assistant.user', '{"id":"u1","role":"root"}');
+
+      const restored = await freshService();
+
+      expect(restored.isAuthenticated()).toBe(false);
+      expect(restored.looksSignedIn()).toBe(false);
+    });
+
+    it('forgets the snapshot on sign-out, so a later reload starts clean', () => {
+      auth.login('ama@acmetech.example', 'correct-horse-1!').subscribe();
+
+      http
+        .expectOne(`${API_BASE_URL}/api/auth/login`)
+        .flush({ user: snapshot });
+      http.expectOne(`${API_BASE_URL}/api/auth/csrf`).flush({ csrf_token: 'a-token' });
+
+      expect(localStorage.getItem('knowledge-assistant.user')).not.toBeNull();
+
+      auth.clear();
+
+      // A snapshot left behind would be read on the next load as a session, which
+      // is signing out in everything but name.
+      expect(localStorage.getItem('knowledge-assistant.user')).toBeNull();
+    });
+  });
+
+    describe('verifySession', () => {
+    it('is true when the cookies round-trip', async () => {
+      let proven: boolean | null = null;
+      auth.verifySession().subscribe((value) => (proven = value));
+
+      http.expectOne(ME).flush({ id: 'u1', name: 'Ama', email: 'a@acmetech.example', role: 'employee' });
+
+      await Promise.resolve();
+      expect(proven).toBe(true);
+    });
+
+    it('is false when the browser kept no session, without touching the user', async () => {
+      // A pure check: it neither signs anybody in nor out, so the caller decides
+      // what a missing session means on its own screen.
+      let proven: boolean | null = null;
+      auth.verifySession().subscribe((value) => (proven = value));
+
+      http
+        .expectOne(ME)
+        .flush({ detail: 'Not authenticated' }, { status: 401, statusText: 'Unauthorized' });
+
+      await Promise.resolve();
+      expect(proven).toBe(false);
+    });
+
+    it('rethrows what never reached the backend', async () => {
+      let failure: unknown;
+      auth.verifySession().subscribe({ error: (error: unknown) => (failure = error) });
+
+      http.expectOne(ME).error(new ProgressEvent('error'));
+
+      await Promise.resolve();
+      expect(failure).toBeTruthy();
+    });
+  });
+
+  describe('refresh', () => {    /** A session, established the way a guard would find it. */
+    const establish = async (): Promise<void> => {
       withHint();
 
-      const settled = auth.maybeBootstrap();
+      const signedIn = auth.maybeBootstrap();
       answerWithUser('employee');
-      await settle(settled);
+      await settle(signedIn);
+    };
 
-      // The session cookies live on the API's host and are unreadable here, so
-      // without this the next refresh would start from "nobody".
-      const stored = localStorage.getItem(SESSION_CACHE_KEY);
+    it('ends the session when the backend refuses it', async () => {
+      await establish();
 
-      expect(stored).toBeTruthy();
-      expect(JSON.parse(stored as string).email).toBe('ama@acmetech.example');
-    });
+      const refused = auth.refresh();
+      http
+        .expectOne(`${API_BASE_URL}/api/auth/refresh`)
+        .flush({ detail: 'No active session.' }, { status: 401, statusText: 'Unauthorized' });
 
-    it('restores the cached user before any request answers', async () => {
-      // A refresh: every signal is back to its page-load value, but the storage
-      // survived. The guards and the shell must see the right answer on the
-      // first paint rather than after the round trip — that round trip is what
-      // used to flash the sign-in screen.
-      seedCache();
-
-      await auth.initialize();
-
-      expect(auth.isAuthenticated()).toBe(true);
-      expect(auth.initialized()).toBe(true);
-
-      // The live check is still in flight behind that answer: nothing was
-      // decided from the network yet.
-      const revalidation = http.expectOne(ME);
-
-      // And it confirms rather than contradicts.
-      revalidation.flush({ ...cachedUser });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      http.expectOne(`${API_BASE_URL}/api/auth/csrf`).flush({ csrf_token: 'test-token' });
-
-      expect(auth.isAuthenticated()).toBe(true);
-    });
-
-    it('forgets a session the server says is over', async () => {
-      // The cache is trusted for the first paint only. Here the server
-      // disagrees, so the memory goes with the session.
-      seedCache();
-
-      await auth.initialize();
-      expect(auth.isAuthenticated()).toBe(true);
-
-      http.expectOne(ME).flush(
-        { detail: 'Not authenticated' },
-        { status: 401, statusText: 'Unauthorized' },
-      );
-
-      // No refresh is tried here: a known session's 401 has already been through
-      // the interceptor's own refresh attempt in the real app (this TestBed wires
-      // no interceptors, so none fires at all). Repeating it would present a
-      // rotated token as a replay.
-      http.expectNone(REFRESH);
-
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      http.expectOne(`${API_BASE_URL}/api/auth/csrf`).flush({ csrf_token: 'test-token' });
-
+      await expect(refused).resolves.toBeNull();
       expect(auth.isAuthenticated()).toBe(false);
-      expect(localStorage.getItem(SESSION_CACHE_KEY)).toBeNull();
     });
 
-    it('ignores a corrupt entry rather than signing anybody in from it', async () => {
-      localStorage.setItem(SESSION_CACHE_KEY, 'half-written{{{');
+    it('rethrows what never reached the backend instead of signing out', async () => {
+      // A backend that is asleep or unreachable has said nothing about the
+      // session. Converting that silence into a logout signed people out for
+      // trying to use the app while it was waking up.
+      await establish();
 
-      await auth.initialize();
+      const pending = auth.refresh();
+      http.expectOne(`${API_BASE_URL}/api/auth/refresh`).error(new ProgressEvent('error'));
 
-      // Reads as no memory: the ordinary signed-out path, with no request.
-      expect(auth.isAuthenticated()).toBe(false);
-      expect(auth.initialized()).toBe(true);
-      expect(localStorage.getItem(SESSION_CACHE_KEY)).toBeNull();
-      http.verify();
+      await expect(pending).rejects.toThrow();
+      expect(auth.isAuthenticated()).toBe(true);
     });
   });
 });

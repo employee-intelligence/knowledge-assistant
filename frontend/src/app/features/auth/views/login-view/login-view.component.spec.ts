@@ -6,12 +6,14 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter, Router } from '@angular/router';
 
 import { API_BASE_URL } from '../../../../core/api.config';
+import { AuthService } from '../../../../core/services/auth.service';
 import { LoginViewComponent } from './login-view.component';
 
 describe('LoginViewComponent', () => {
   let fixture: ComponentFixture<LoginViewComponent>;
   let http: HttpTestingController;
   let router: Router;
+  let auth: AuthService;
 
   const element = (): HTMLElement => fixture.nativeElement as HTMLElement;
   const fields = (): HTMLInputElement[] =>
@@ -51,7 +53,13 @@ describe('LoginViewComponent', () => {
     await TestBed.configureTestingModule({
       imports: [LoginViewComponent],
       providers: [
-        provideRouter([{ path: 'login', children: [] }]),
+        provideRouter([
+          { path: 'login', children: [] },
+          { path: 'pending-approval', children: [] },
+          { path: 'register', children: [] },
+          { path: 'accept-invite', children: [] },
+          { path: '**', children: [] },
+        ]),
         provideHttpClient(),
         provideHttpClientTesting(),
       ],
@@ -60,6 +68,7 @@ describe('LoginViewComponent', () => {
     fixture = TestBed.createComponent(LoginViewComponent);
     http = TestBed.inject(HttpTestingController);
     router = TestBed.inject(Router);
+    auth = TestBed.inject(AuthService);
     await render();
   });
 
@@ -83,8 +92,37 @@ describe('LoginViewComponent', () => {
     expect(element().textContent).not.toContain('Forgot password?');
   });
 
-  it('offers a way to request access, so the form cannot dead-end', async () => {
-    expect(element().querySelector('a[href="/register"]')).not.toBeNull();
+  it('centres the question and the answer together, on one row', () => {
+    const register = element().querySelector('a[href="/register"]') as HTMLElement;
+    const row = register.parentElement as HTMLElement;
+
+    // Centred by the box rather than by `text-align`, which only works while both
+    // halves happen to be inline — and drifts them to opposite edges the moment they
+    // are not.
+    expect(row.className).toContain('justify-center');
+    expect(row.className).toContain('flex-wrap');
+    // The two halves separately, because Angular drops the whitespace between
+    // elements and the gap between them is a flex gap rather than a character.
+    expect(row.querySelector('span')?.textContent?.trim()).toBe(
+      "Don't have an account?",
+    );
+    expect(register.textContent?.trim()).toBe('Create an account');
+  });
+
+  it('offers a way to register, so the form does not dead-end', async () => {
+    // Sign-in is the screen everybody reaches first, including somebody who has no
+    // account yet. Without this the only way to find registration is to already know
+    // it exists, which is the same as not having it.
+    const register = element().querySelector('a[href="/register"]');
+
+    expect(register).not.toBeNull();
+    expect(register?.textContent).toContain('Create an account');
+  });
+
+  it('does not offer the invitation route, which was told to them already', () => {
+    // Somebody who was invited knows they were: it reached them by a link an
+    // administrator sent. Sitting it beside "no account yet" asked a second question
+    // of the person who had just been given the answer.
     expect(element().querySelector('a[href="/accept-invite"]')).toBeNull();
   });
 
@@ -154,30 +192,159 @@ describe('LoginViewComponent', () => {
 
   it('goes to the dashboard once the backend accepts the credentials', async () => {
     // Spied before the form is sent, so the navigation is caught either side of it.
-    const navigate = vi.spyOn(router, 'navigateByUrl');
+    const navigate = vi.spyOn(router, 'navigate');
     await signIn();
 
     http
       .expectOne(`${API_BASE_URL}/api/auth/login`)
       .flush({ user: { id: 'u1', name: 'Ama Mensah', email: 'a@b.test', role: 'employee' } });
+    // The session is proved to stick before navigating: sign-in only proved the
+    // password, and the session lives in cookies the browser has to keep.
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/me`)
+      .flush({ id: 'u1', name: 'Ama Mensah', email: 'a@b.test', role: 'employee' });
     await render();
 
-    expect(navigate).toHaveBeenCalledWith('/');
+    expect(navigate).toHaveBeenCalledWith(['/']);
   });
 
   it('lands an administrator on the dashboard, and an employee on the assistant', async () => {
-    const navigate = vi.spyOn(router, 'navigateByUrl');
+    const navigate = vi.spyOn(router, 'navigate');
     await signIn();
 
     http
       .expectOne(`${API_BASE_URL}/api/auth/login`)
       .flush({ user: { id: 'u1', name: 'Kwame Osei', email: 'kwame@acmetech.example', role: 'admin' } });
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/me`)
+      .flush({ id: 'u1', name: 'Kwame Osei', email: 'kwame@acmetech.example', role: 'admin' });
     await render();
 
     // An administrator's job starts on the dashboard. Sending them to the assistant
     // instead means the first thing they see after signing in is a chat screen they
     // have to navigate out of.
-    expect(navigate).toHaveBeenCalledWith('/admin');
+    expect(navigate).toHaveBeenCalledWith(['/admin']);
+  });
+
+  it('lands an administrator on the dashboard even when a return address was asked for', async () => {
+    const navigate = vi.spyOn(router, 'navigate');
+    await router.navigate(['/login'], { queryParams: { returnUrl: '/ask' } });
+    await render();
+    await signIn();
+
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/login`)
+      .flush({ user: { id: 'u1', name: 'Kwame Osei', email: 'kwame@acmetech.example', role: 'admin' } });
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/me`)
+      .flush({ id: 'u1', name: 'Kwame Osei', email: 'kwame@acmetech.example', role: 'admin' });
+    await render();
+
+    // The dashboard is home after signing in; Ask stays one click away rather
+    // than being the screen an administrator is dropped into.
+    expect(navigate).toHaveBeenCalledWith(['/admin']);
+  });
+
+  it('does not send a signed-in employee back to registration from returnUrl', async () => {
+    const navigate = vi.spyOn(router, 'navigate');
+    await router.navigate(['/login'], { queryParams: { returnUrl: '/register' } });
+    await render();
+    await signIn();
+
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/login`)
+      .flush({
+        user: {
+          id: 'u1',
+          name: 'Ama Mensah',
+          email: 'ama.mensah@acmetech.example',
+          role: 'employee',
+        },
+      });
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/me`)
+      .flush({
+        id: 'u1',
+        name: 'Ama Mensah',
+        email: 'ama.mensah@acmetech.example',
+        role: 'employee',
+      });
+    await render();
+
+    expect(navigate).toHaveBeenCalledWith(['/']);
+    expect(navigate).not.toHaveBeenCalledWith(['/register']);
+  });
+
+  it('stays and says why when the browser did not keep the session', async () => {
+    // The password was right and a session was issued, but the follow-up check
+    // found no session to speak of — the browser dropped the cookies. Navigating
+    // in anyway would end seconds later back on this screen with nothing said,
+    // so it stays here and names the reason instead.
+    const navigate = vi.spyOn(router, 'navigate');
+    await signIn();
+
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/login`)
+      .flush({ user: { id: 'u1', name: 'Ama Mensah', email: 'a@b.test', role: 'employee' } });
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/me`)
+      .flush({ detail: 'Not authenticated' }, { status: 401, statusText: 'Unauthorized' });
+    await render();
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(element().textContent).toContain('did not keep the session');
+    expect(element().textContent).not.toContain('Signing in…');
+  });
+
+  it('navigates anyway when the proof itself cannot be had', async () => {
+    // A check that never answers is a backend that cannot be reached, not a
+    // session that failed. Holding the sign-in for it would punish a blip, and
+    // the guards and data calls ahead report an outage plainer than this screen.
+    const navigate = vi.spyOn(router, 'navigate');
+    await signIn();
+
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/login`)
+      .flush({ user: { id: 'u1', name: 'Ama Mensah', email: 'a@b.test', role: 'employee' } });
+    http.expectOne(`${API_BASE_URL}/api/auth/me`).error(new ProgressEvent('error'));
+    await render();
+
+    expect(navigate).toHaveBeenCalledWith(['/']);
+  });
+
+  it('shows the waiting screen when the account is not approved yet', async () => {
+    const navigate = vi.spyOn(router, 'navigate');
+    await signIn();
+
+    // The server's 202, which it sends only when the password was right. Nothing is
+    // wrong: the account exists and an administrator has not got to it yet.
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/login`)
+      .flush(
+        { status: 'pending', name: 'Kofi Mensah', requested_role: 'employee' },
+        { status: 202, statusText: 'Accepted' },
+      );
+    await render();
+
+    // A separate screen rather than a 401, which would tell somebody to reset a
+    // password that is perfectly fine.
+    expect(navigate).toHaveBeenCalledWith(['/pending-approval']);
+  });
+
+  it('stores nothing when the answer is "still pending"', async () => {
+    await signIn();
+
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/login`)
+      .flush(
+        { status: 'pending', name: 'Kofi Mensah', requested_role: 'admin' },
+        { status: 202, statusText: 'Accepted' },
+      );
+    await render();
+
+    // No user, no session hint: a pending account must not be mistakable for a
+    // signed-in one anywhere else in the app.
+    expect(auth.user()).toBeNull();
   });
 
   it('returns to where the guard interrupted, when it was asked to', async () => {
@@ -208,6 +375,56 @@ describe('LoginViewComponent', () => {
     expect(element().textContent).toContain('do not match an account');
     expect(element().textContent).not.toContain('Signing in…');
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('never tells somebody their password is wrong when the server fell over', async () => {
+    await signIn();
+
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/login`)
+      .flush({ detail: 'Internal server error.' }, { status: 500, statusText: 'Server Error' });
+    await render();
+
+    // A 500 says nothing about the email or the password. Wording it as a credential
+    // failure sends the reader to reset a password that was fine, and they are refused
+    // again the moment the backend recovers — having changed nothing.
+    const text = element().textContent ?? '';
+
+    expect(text).not.toContain('do not match an account');
+    expect(text).toContain('went wrong');
+    expect(text).toContain('try again');
+  });
+
+  it('does not put a backend exception in front of the reader', async () => {
+    await signIn();
+
+    // A 5xx body can arrive carrying whatever the backend broke on. Even if it did,
+    // none of it may be shown: it is not written for a reader and it describes the
+    // inside of the system rather than anything the person can act on.
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/login`)
+      .flush(
+        { detail: 'OperationalError: could not connect to server "db-primary"' },
+        { status: 500, statusText: 'Server Error' },
+      );
+    await render();
+
+    const text = element().textContent ?? '';
+
+    expect(text).not.toContain('OperationalError');
+    expect(text).not.toContain('db-primary');
+    expect(text).not.toContain('do not match an account');
+  });
+
+  it('blames the credentials for a 403, which is a refusal of this request', async () => {
+    await signIn();
+
+    http
+      .expectOne(`${API_BASE_URL}/api/auth/login`)
+      .flush({ detail: 'Forbidden' }, { status: 403, statusText: 'Forbidden' });
+    await render();
+
+    expect(element().textContent).toContain('do not match an account');
   });
 
   it('says so plainly when the attempt limit is reached', async () => {

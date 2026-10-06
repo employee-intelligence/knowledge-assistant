@@ -1,3 +1,5 @@
+import { vi } from 'vitest';
+
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
@@ -5,7 +7,7 @@ import { CanActivateFn, Router, UrlTree, provideRouter } from '@angular/router';
 
 import { API_BASE_URL } from '../api.config';
 import { AuthService } from '../services/auth.service';
-import { adminGuard, authGuard, guestGuard } from './auth.guard';
+import { adminGuard, authGuard, guestGuard, landingGuard } from './auth.guard';
 
 /** A stand-in route, which is all a `CanActivateFn` is given. */
 const route = {} as never;
@@ -45,36 +47,6 @@ describe('auth guards', () => {
     document.cookie = 'ika_session=1; path=/';
   };
 
-  /** Where the service remembers who signed in between loads. */
-  const SESSION_CACHE_KEY = 'ika.session.v1';
-
-  /** A previous visit's memory, as the service would have written it. */
-  const withCachedSession = (role: 'employee' | 'admin' = 'employee'): void => {
-    localStorage.setItem(
-      SESSION_CACHE_KEY,
-      JSON.stringify({
-        id: 'u1',
-        name: 'Ama Konadu',
-        email: 'ama@acmetech.example',
-        role,
-      }),
-    );
-  };
-
-  /**
-   * Answers the refresh attempt a `GET /api/auth/me` 401 triggers while nobody
-   * is known to be signed in, with a session that is genuinely over.
-   *
-   * The access token dies after fifteen minutes and the refresh token after
-   * fourteen days, so the first 401 alone cannot prove the session is over and
-   * one refresh is tried first.
-   */
-  const answerRefreshExpired = (): void => {
-    http
-      .expectOne(`${API_BASE_URL}/api/auth/refresh`)
-      .flush({ detail: 'No active session.' }, { status: 401, statusText: 'Unauthorized' });
-  };
-
   /**
    * Answers the `GET /api/auth/me` the guard asked for.
    *
@@ -98,11 +70,9 @@ describe('auth guards', () => {
 
   beforeEach(async () => {
     // Cleared between tests: `document.cookie` outlives the injector, so a hint left
-    // behind by one test would make the next one believe it had a session.
+    // behind by one test would make the next one believe it had a session. The
+    // remembered session in storage outlives it too, for the same reason.
     document.cookie = 'ika_session=; path=/; max-age=0';
-
-    // The cached user outlives the injector the same way: a session remembered
-    // by one test would let the next test's guards through without asking.
     localStorage.clear();
 
     await TestBed.configureTestingModule({
@@ -148,6 +118,84 @@ describe('auth guards', () => {
       expect(redirectedTo(allowed)).toContain('returnUrl');
     });
 
+    it('still redirects, rather than failing, when the backend cannot be reached', async () => {
+      // A sleeping backend is not a signed-out visitor. The guard cannot answer,
+      // so it falls back to the last known state instead of rejecting — a
+      // rejection would leave the navigation hanging rather than landing anywhere.
+      withSessionHint();
+      const result = run(authGuard);
+
+      http.expectOne(`${API_BASE_URL}/api/auth/me`).error(new ProgressEvent('error'));
+      http.expectOne(`${API_BASE_URL}/api/auth/refresh`).error(new ProgressEvent('error'));
+
+      expect(redirectedTo(await result)).toContain('/login');
+    });
+
+    it('lets a restored session through without waiting for the network', async () => {
+      // The bug this covers: on a refresh the app knew nobody until `/me`
+      // answered, so the sign-in screen could be shown for a frame before the real
+      // page arrived. The snapshot makes the answer available before the first
+      // render, so the guard answers immediately and `/me` only confirms it.
+      localStorage.setItem(
+        'knowledge-assistant.user',
+        JSON.stringify({
+          id: 'u1',
+          name: 'Ama Konadu',
+          email: 'ama@acmetech.example',
+          role: 'employee',
+        }),
+      );
+
+      const result = run(authGuard);
+
+      // Settled without anything being answered first.
+      expect(await result).toBe(true);
+
+      // The revalidation is still on its way, and the CSRF token that follows it.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      http.expectOne(`${API_BASE_URL}/api/auth/me`).flush({
+        id: 'u1',
+        name: 'Ama Konadu',
+        email: 'ama@acmetech.example',
+        role: 'employee',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      http.expectOne(`${API_BASE_URL}/api/auth/csrf`).flush({ csrf_token: 'a-token' });
+      http.verify();
+    });
+
+    it('sends a restored session to the sign-in screen once it is confirmed gone', async () => {
+      // The counterpart: letting the guard through early must not leave a dead
+      // session on a page that can load nothing. Reaching sign-in without a flash
+      // of the app is the whole behaviour.
+      localStorage.setItem(
+        'knowledge-assistant.user',
+        JSON.stringify({
+          id: 'u1',
+          name: 'Ama Konadu',
+          email: 'ama@acmetech.example',
+          role: 'employee',
+        }),
+      );
+
+      const navigate = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+
+      expect(await run(authGuard)).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      http
+        .expectOne(`${API_BASE_URL}/api/auth/me`)
+        .flush({ detail: 'Not authenticated' }, { status: 401, statusText: 'Unauthorized' });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      http
+        .expectOne(`${API_BASE_URL}/api/auth/refresh`)
+        .flush({ detail: 'No active session.' }, { status: 401, statusText: 'Unauthorized' });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(navigate).toHaveBeenCalled();
+      expect(TestBed.inject(AuthService).isAuthenticated()).toBe(false);
+    });
+
     it('asks only once however many guards run', async () => {
       withSessionHint();
       const first = run(authGuard);
@@ -169,105 +217,6 @@ describe('auth guards', () => {
       http
         .match(`${API_BASE_URL}/api/auth/csrf`)
         .forEach((request) => request.flush({ csrf_token: 't' }));
-      http.verify();
-    });
-  });
-
-  describe('waiting for the startup check', () => {
-    /** Answers the CSRF request a settled check fires on its way out. */
-    const flushCsrf = (): void => {
-      http
-        .match(`${API_BASE_URL}/api/auth/csrf`)
-        .forEach((request) => request.flush({ csrf_token: 't' }));
-    };
-
-    it('does not decide while the startup check is still in flight', async () => {
-      withSessionHint();
-
-      // The initializer started the single check but the answer has not landed.
-      // A guard that read the signals now would see "no user yet" and send a
-      // signed-in person to the sign-in screen — the refresh flash. It must
-      // queue behind the real response instead.
-      const initializing = TestBed.inject(AuthService).initialize();
-      const result = run(authGuard);
-
-      let settledWith: boolean | UrlTree | undefined;
-      void result.then((allowed) => {
-        settledWith = allowed;
-      });
-
-      // Let every pending microtask run: a guard that decided early would have
-      // resolved to the sign-in screen by now.
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(settledWith).toBeUndefined();
-
-      answerSession('employee');
-
-      expect(await result).toBe(true);
-      await initializing;
-      flushCsrf();
-      http.verify();
-    });
-
-    it('asks nothing more once the startup check has settled', async () => {
-      withSessionHint();
-
-      const initializing = TestBed.inject(AuthService).initialize();
-      answerSession('employee');
-      await initializing;
-      flushCsrf();
-
-      // The answer is already in hand: the guard decides from it without going
-      // back to the API, so a refresh costs exactly one `/me` however many
-      // guarded routes and guards are involved.
-      expect(await run(authGuard)).toBe(true);
-      http.expectNone(`${API_BASE_URL}/api/auth/me`);
-      http.verify();
-    });
-
-    it('sends an expired session to the sign-in screen, but only on the answer', async () => {
-      withSessionHint();
-
-      const result = run(authGuard);
-
-      // The redirect needs the server's answer: nothing may send the person away
-      // before the check that proves the session is over. That answer is two
-      // requests — the access token's 401, then the refresh's refusal — because
-      // the first alone only proves the short-lived token died.
-      answerSession(null);
-      answerRefreshExpired();
-
-      expect(redirectedTo(await result)).toContain('/login');
-      flushCsrf();
-      http.verify();
-    });
-
-    it('lets a cached session through while the live check is still in flight', async () => {
-      // A refresh with a previous visit's memory: the guard sees who signed in
-      // on the first paint instead of after the round trip. Waiting for the
-      // answer would be a spinner at best; redirecting first would be the
-      // sign-in flash this exists to remove.
-      withCachedSession();
-      await TestBed.inject(AuthService).initialize();
-
-      const result = run(authGuard);
-
-      // The live revalidation is still unanswered behind the guard's decision:
-      // capturing it proves it was in flight, and the guard passing before the
-      // flush below proves the decision came from the cache, not the network.
-      // (`expectOne` consumes the match, so the same handle is flushed rather
-      // than matched again.)
-      const revalidation = http.expectOne(`${API_BASE_URL}/api/auth/me`);
-      expect(await result).toBe(true);
-
-      revalidation.flush({
-        id: 'u1',
-        name: 'Ama Konadu',
-        email: 'ama@acmetech.example',
-        role: 'employee',
-      });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      flushCsrf();
       http.verify();
     });
   });
@@ -326,7 +275,13 @@ describe('auth guards', () => {
       http
         .expectOne(`${API_BASE_URL}/api/auth/me`)
         .flush({ detail: 'Not authenticated' }, { status: 401, statusText: 'Unauthorized' });
-      answerRefreshExpired();
+
+      // And the refresh that follows, refused. A 401 on `/me` is not on its own the
+      // end of a session: the access cookie is short-lived and the refresh cookie
+      // outlives it, so one refresh is tried before the answer is signed out.
+      http
+        .expectOne(`${API_BASE_URL}/api/auth/refresh`)
+        .flush({ detail: 'Not authenticated' }, { status: 401, statusText: 'Unauthorized' });
 
       expect(await result).toBe(true);
     });
@@ -371,6 +326,36 @@ describe('auth guards', () => {
     });
   });
 
+  describe('landingGuard', () => {
+    it('sends an administrator arriving at the front door to the dashboard', async () => {
+      withSessionHint();
+      const result = run(landingGuard);
+      answerSession('admin');
+
+      // The dashboard is where an administrator's work is, and the chat screen is
+      // not what they came for.
+      expect(redirectedTo(await result)).toBe('/admin');
+    });
+
+    it('lets an employee through to the assistant', async () => {
+      withSessionHint();
+      const result = run(landingGuard);
+      answerSession('employee');
+
+      // Only administrators are redirected. An employee has nothing else to land on.
+      expect(await result).toBe(true);
+    });
+
+    it('sends a signed-out visitor to the sign-in screen, not to the dashboard', async () => {
+      // The session check is taken from the shared decision, so somebody signed out
+      // is not bounced to the dashboard first and arrives at the sign-in screen a
+      // moment later.
+      const result = run(landingGuard);
+
+      expect(redirectedTo(await result)).toContain('/login');
+    });
+  });
+
   describe('during a server render', () => {
     /**
      * Re-registers the service as one that says it is not in a browser.
@@ -398,6 +383,15 @@ describe('auth guards', () => {
       asServerRender();
 
       expect(await run(authGuard)).toBe(true);
+      http.expectNone(`${API_BASE_URL}/api/auth/me`);
+    });
+
+    it('lets the front door through rather than guessing the role', async () => {
+      asServerRender();
+
+      // A render knows nobody's role. Redirecting here would send every
+      // administrator to the dashboard before the client had taken over at all.
+      expect(await run(landingGuard)).toBe(true);
       http.expectNone(`${API_BASE_URL}/api/auth/me`);
     });
 

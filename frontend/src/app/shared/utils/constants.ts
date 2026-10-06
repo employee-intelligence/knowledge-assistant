@@ -10,24 +10,38 @@ export const MAX_QUESTION_LENGTH = 500;
 /**
  * Placeholder shown in the composer when it is empty.
  *
- * Two words. It sits inside a field that is already the widest thing on the screen
- * and already has a send button beside it, so a sentence describing what the
- * assistant knows is redundant with the answer it gives. Anything longer than this
- * is read rather than glanced at, and it is gone the moment the field is touched.
+ * "Ask anything" promised more than the assistant delivers. It answers from a fixed
+ * set of internal documents, and says plainly when a question is not in them, so the
+ * prompt names that instead of implying every question is answerable — which is the
+ * difference between knowing what to ask and finding out by being refused.
+ *
+ * Short for the width it has to live in, and measured rather than guessed: the
+ * composer is a full-width field with a send button beside it, which on a 280px
+ * screen leaves about 170px of usable text. "Ask about company policies" measured
+ * wider than that and clipped, and a placeholder cut off mid-word is worse than a
+ * vague one. This one fits at every width from there up.
  */
-export const QUESTION_PLACEHOLDER = 'Ask anything';
+export const QUESTION_PLACEHOLDER = 'Ask about our policies';
 
 /**
  * Starter prompts on the dashboard. Product copy rather than data: the backend has
  * no endpoint for them, and inventing one would mean guessing at a contract it does
  * not have.
  *
- * Two of them, and two words each. A row of suggestions is a decision aid, so the
- * smaller it is the more it reads as a choice rather than as a menu to browse, and a
- * two-word topic is enough to recognise what the assistant knows about. The full
- * question is typed into the composer, which is one field away and remembers it.
+ * Two of them, and both written as the question that is actually asked. Choosing one
+ * sends it to the assistant as the question verbatim, so a two-word topic was not a
+ * shortcut on the way to asking it — it was the question, and the assistant was
+ * handed a bare noun to answer. The button also said what it would do: pressing it
+ * asks something, and this now reads as the thing being asked rather than as a
+ * chapter of a handbook.
+ *
+ * Both are answerable from the documents that are actually loaded, so neither
+ * suggestion leads to a "no answer found" on the first press.
  */
-export const STARTER_QUESTIONS: readonly string[] = ['Annual leave', 'VPN setup'];
+export const STARTER_QUESTIONS: readonly string[] = [
+  'How many annual leave days do I get?',
+  'How do I set up the VPN on a new laptop?',
+];
 
 /** Key used to remember the desktop sidebar preference. */
 export const SIDEBAR_PREFERENCE_KEY = 'ika.sidebar.collapsed';

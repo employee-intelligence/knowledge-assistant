@@ -2,13 +2,16 @@ import { ChangeDetectionStrategy, Component, computed, input } from '@angular/co
 
 /** Every icon the shell uses, so `name` stays a closed, typo-proof set. */
 export type IconName =
+  | 'arrow-left'
   | 'arrow-up-right'
   | 'bot'
   | 'check'
   | 'check-circle-2'
   | 'clock'
+  | 'compass'
   | 'copy'
   | 'file-text'
+  | 'gauge'
   | 'info'
   | 'loader-2'
   | 'menu'
@@ -107,6 +110,12 @@ const OPTICAL_STROKE = 48;
             <path d="M12 7v5l3 2" />
           </g>
         }
+        @case ('compass') {
+          <g>
+            <circle cx="12" cy="12" r="10" />
+            <path d="m16.24 7.76-2.12 6.36-6.36 2.12 2.12-6.36z" />
+          </g>
+        }
         @case ('copy') {
           <g>
             <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
@@ -119,6 +128,12 @@ const OPTICAL_STROKE = 48;
               d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"
             />
             <path d="M14 2v5a1 1 0 0 0 1 1h5M10 9H8m8 4H8m8 4H8" />
+          </g>
+        }
+        @case ('gauge') {
+          <g>
+            <path d="m12 14 4-4" />
+            <path d="M3.34 19a10 10 0 1 1 17.32 0" />
           </g>
         }
         @case ('info') {
@@ -149,6 +164,12 @@ const OPTICAL_STROKE = 48;
           <g>
             <rect width="18" height="18" x="3" y="3" rx="2" />
             <path d="M9 3v18" />
+          </g>
+        }
+        @case ('arrow-left') {
+          <g>
+            <path d="M19 12H5" />
+            <path d="m12 19-7-7 7-7" />
           </g>
         }
         @case ('paperclip') {

@@ -1,33 +1,32 @@
 import { provideHttpClient, withInterceptors } from '@angular/common/http';
-import {
-  APP_INITIALIZER,
-  ApplicationConfig,
-  provideBrowserGlobalErrorListeners,
-} from '@angular/core';
+import { ApplicationConfig, provideBrowserGlobalErrorListeners, APP_INITIALIZER } from '@angular/core';
 import { provideClientHydration } from '@angular/platform-browser';
 import { provideRouter, withComponentInputBinding, withInMemoryScrolling } from '@angular/router';
 
 import { routes } from './app.routes';
 import { authInterceptor } from './core/interceptors/auth.interceptor';
+import { ConfigService, loadConfig } from './core/config.service';
 import { AuthService } from './core/services/auth.service';
+
+const initializeApp = (configService: ConfigService, authService: AuthService) => async () => {
+  await loadConfig(configService)();
+
+  // When a snapshot was restored from storage the app already renders the right
+  // page, so blocking the router on a revalidation would only hold a correct
+  // screen on a blank one. Revalidate in the background instead; the guards do
+  // the same, and a failed revalidation clears the user and redirects.
+  if (authService.isAuthenticated()) {
+    void authService.maybeBootstrap().catch(() => undefined);
+
+    return;
+  }
+
+  await authService.maybeBootstrap();
+};
 
 export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
-    // Settles the session before the router's first navigation runs, so no
-    // guard ever decides on signals that are still at their page-load values.
-    // Without this, a refresh of a protected page lets the guard answer "signed
-    // out" before the one `GET /api/auth/me` resolves, and the app flashes
-    // through the sign-in screen on its way back. The factory returns the real
-    // check's promise — not a timer — so slow networks simply settle later
-    // rather than deciding wrongly. Never rejects and never requests on the
-    // server, so neither a dead session nor a server render can hold up the boot.
-    {
-      provide: APP_INITIALIZER,
-      multi: true,
-      useFactory: (auth: AuthService) => () => auth.initialize(),
-      deps: [AuthService],
-    },
     provideRouter(
       routes,
       withComponentInputBinding(),
@@ -44,5 +43,12 @@ export const appConfig: ApplicationConfig = {
     // somebody who has not thought about auth at all.
     provideHttpClient(withInterceptors([authInterceptor])),
     provideClientHydration(),
+    ConfigService,
+    {
+      provide: APP_INITIALIZER,
+      useFactory: initializeApp,
+      deps: [ConfigService, AuthService],
+      multi: true,
+    },
   ],
 };

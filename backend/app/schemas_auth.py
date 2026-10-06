@@ -86,6 +86,90 @@ class UserResponse(BaseModel):
     user: UserDto
 
 
+class PendingApprovalResponse(BaseModel):
+    """A correct sign-in for an account that exists but is not switched on.
+
+    The third answer `POST /api/auth/login` can give, and the reason it is a `202`
+    rather than a `401` is the whole point of it. Nothing went wrong: the password was
+    right, the account is real, and an administrator has not got to it yet. Refusing it
+    tells somebody to reset a password that is perfectly fine, and it sends them
+    looking for a problem with the one thing that was not broken.
+
+    Sent **only when the password verified**, which is what makes it safe to send at
+    all. The caller has proved they own the account by knowing its password, so naming
+    its state tells them nothing an attacker could not already work out. A wrong
+    password still gets the one generic refusal whether the address is unknown, taken,
+    or waiting — so this cannot be used to find out who has asked to join.
+
+    `requested_role` is null whenever the backend does not actually know it. A pending
+    account knows the role it will be given; a request that has not been decided does
+    not, and guessing would be a claim about an approval that has not happened.
+    """
+
+    status: Literal["pending"] = "pending"
+    name: str
+    requested_role: Role | None = None
+
+
+class UserSummaryDto(BaseModel):
+    """One account, as an administrator's list shows it."""
+
+    id: str
+    name: str
+    email: str
+    role: Role
+    is_active: bool
+    created_at: datetime
+
+
+class UserListResponse(BaseModel):
+    """One page of accounts, with its own page count so the pager cannot disagree."""
+
+    users: list[UserSummaryDto]
+    total: int
+    page: int
+    per_page: int
+    pages: int
+
+
+class UserUpdateRequest(BaseModel):
+    """Corrections to an account. Every field optional and independent."""
+
+    name: NameStr | None = None
+    email: EmailStr | None = None
+    role: Role | None = None
+    is_active: bool | None = None
+
+
+class PasswordResetRequest(BaseModel):
+    """A new password, chosen by an administrator for somebody locked out."""
+
+    password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+
+    @field_validator("password")
+    @classmethod
+    def check_policy(cls, value: str) -> str:
+        return check_password_policy(value)
+
+
+class ChangeOwnPasswordRequest(BaseModel):
+    """A password change by the person it belongs to.
+
+    The current password proves possession: a session cookie alone is not enough
+    to set a new one, so a laptop left signed in cannot be used to lock its owner
+    out. The policy applies to the new password exactly as it does everywhere a
+    password is set.
+    """
+
+    current_password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+    new_password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+
+    @field_validator("new_password")
+    @classmethod
+    def check_policy(cls, value: str) -> str:
+        return check_password_policy(value)
+
+
 class CsrfResponse(BaseModel):
     """The double-submit token, echoed so the caller need not read the cookie.
 

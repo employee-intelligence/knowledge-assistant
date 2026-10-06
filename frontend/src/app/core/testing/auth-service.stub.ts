@@ -44,6 +44,15 @@ export class AuthServiceStub {
   readonly isAdmin = this.adminState.asReadonly();
 
   /**
+   * Whether somebody is signed in who is not an administrator.
+   *
+   * Mirrors the real service's rule, so a spec that signs somebody out sees the same
+   * thing the screens see: no user is not a user without administrator access, and
+   * the two must not be answered the same way.
+   */
+  readonly lacksAdminAccess = computed(() => this.isAuthenticated() && !this.isAdmin());
+
+  /**
    * Where this person lands after signing in.
    *
    * Mirrors the real service's rule rather than being a fixed value, because the
@@ -52,10 +61,30 @@ export class AuthServiceStub {
    */
   readonly landingPath = computed(() => (this.isAdmin() ? '/admin' : '/'));
 
+  /**
+   * Where the assistant is reached deliberately.
+   *
+   * Mirrors the real service's rule for the same reason `landingPath` does: the
+   * sidebar links here, and a stub answering `/` for an administrator would point
+   * the link at the front door that turns administrators away.
+   */
+  readonly assistantPath = computed(() => (this.isAdmin() ? '/ask' : '/'));
+
   /** Sign-out is a navigation in these tests, so the call itself does nothing. */
   logout(): Observable<void> {
     this.setRole('anonymous');
 
+    return of(undefined);
+  }
+
+  /**
+   * Changes the signed-in person's own password.
+   *
+   * Always succeeds: there is no backend to check the current password against
+   * here. Present so the account card's dialog calls the same seam as the real
+   * service rather than one the tests cannot reach.
+   */
+  changeOwnPassword(): Observable<void> {
     return of(undefined);
   }
 

@@ -1,23 +1,28 @@
 import { isPlatformBrowser } from '@angular/common';
-import { HttpClient } from '@angular/common/http';
+import { HttpBackend, HttpClient } from '@angular/common/http';
 import { Injectable, PLATFORM_ID, computed, inject, signal } from '@angular/core';
-import { Observable, catchError, firstValueFrom, from, map, of, tap } from 'rxjs';
+import { Observable, catchError, firstValueFrom, map, of, tap, throwError } from 'rxjs';
 
-import { API_BASE_URL } from '../api.config';
+import { ConfigService } from '../config.service';
+import { IdentityService } from './identity.service';
 import {
   AccessRequestDecisionDto,
-  CreateAccountRequestDto,
   AccessRequestDecisionRequestDto,
   AccessRequestDto,
   AccessRequestListDto,
   AccessRequestSubmittedDto,
+  ChangeOwnPasswordRequestDto,
+  CreateAccountRequestDto,
+  PasswordResetRequestDto,
+  PendingApprovalDto,
+  UserListDto,
+  UserSummaryDto,
+  UserUpdateRequestDto,
 } from '../models/access-request.model';
 import {
   AcceptInviteRequestDto,
   CsrfResponseDto,
   InvitePreviewDto,
-  InviteRequestDto,
-  InviteResponseDto,
   LoginRequestDto,
   Role,
   UserDto,
@@ -40,21 +45,38 @@ const SESSION_HINT_COOKIE = 'ika_session';
 export const CSRF_HEADER = 'X-CSRF-Token';
 
 /**
- * Where this browser's memory of who signed in is kept.
+ * Remembers, on this origin, that a session was established here.
  *
- * The session cookies live on the API's host and this page cannot read them: on a
- * split deployment (app on one host, API on another) even the `ika_session` hint
- * cookie is invisible to frontend JavaScript, because it is a host-only cookie of
- * the API's host. Without a memory of its own, every refresh settles as "nobody"
- * and the guards send a signed-in person to the sign-in screen.
+ * The readable hint cookie cannot do this job on its own: it is set on the
+ * API's host, and frontend JavaScript on another host can never see it — which
+ * is every production deploy, where app and API are different sites. Without
+ * this flag, every page reload concluded "no session" without asking and sent
+ * a signed-in person back to the sign-in screen, even with a perfectly good
+ * session sitting in the cookie jar.
  *
- * What is stored is the user the server last confirmed — no token, nothing the
- * server does not already hand out. It is a hint, not a credential: it is
- * revalidated against `GET /api/auth/me` on the next load, and anything it says
- * is dropped the moment the server disagrees. Versioned so a future shape change
- * fails closed (unknown shape reads as "no memory") rather than half-parsed.
+ * A flag, not a credential: its only effect is licensing one `GET /me`, whose
+ * answer is what decides. Setting it wrongly buys nothing but a refused
+ * request, and a refused request settles back to signed out on its own.
  */
-const SESSION_CACHE_KEY = 'ika.session.v1';
+const KNOWN_SESSION_KEY = 'knowledge-assistant.session';
+
+/**
+ * The last confirmed signed-in person, as plain JSON.
+ *
+ * Only the user object — id, name, email, role — never a token. Tokens live in
+ * `httpOnly` cookies and are never readable here, so there is nothing secret to
+ * steal out of this entry. Its only job is making a reload instant: without it,
+ * every refresh starts from "unknown" and must wait for `GET /me` before the
+ * guards may render, which is the frame where the wrong screen could appear.
+ * With it, the shell renders the right page immediately and the network only
+ * confirms what is already on screen.
+ *
+ * `localStorage`, not `sessionStorage`: a new tab is the same browser with the
+ * same cookies, so it should open signed in rather than ask again. Cleared the
+ * moment the user is cleared, so signing out never leaves a stale snapshot that
+ * a later reload would briefly render as somebody.
+ */
+const CACHED_USER_KEY = 'knowledge-assistant.user';
 
 /**
  * Where the app stands on authentication, which is not the same as not being signed
@@ -85,31 +107,40 @@ export type AuthStatus = 'unknown' | 'authenticated' | 'anonymous';
 export class AuthService {
   private readonly http = inject(HttpClient);
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
+  private readonly config = inject(ConfigService);
+
+  /**
+   * The backend without the interceptor.
+   *
+   * Used only for checks that must not trigger session machinery: proving the
+   * cookies round-trip must neither refresh nor end the session it is
+   * inspecting, which is exactly what the interceptor would do with a 401.
+   */
+  private readonly raw = new HttpClient(inject(HttpBackend));
 
   private readonly userState = signal<UserDto | null>(null);
   private readonly statusState = signal<AuthStatus>('unknown');
+  private readonly identity = inject(IdentityService);
 
-  /**
-   * Whether the one startup auth check has settled.
-   *
-   * Separate from "is somebody signed in" on purpose. `status` starts as
-   * `unknown`, which cannot tell "not checked yet" apart from "checked and
-   * nobody is there" to a reader that only looks at `isAuthenticated()` — and a
-   * guard that reads that during the first `GET /api/auth/me` sees "no user yet"
-   * and sends a signed-in person to the sign-in screen, only for the answer to
-   * land a moment later and send them back. That round trip is the refresh flash:
-   * a race, not a refusal. Nothing may decide on the session until this is true.
-   */
-  private readonly initializedState = signal(false);
+  constructor() {
+    // Restored synchronously so the first render already knows who is signed
+    // in. Without this, a refresh always starts from "unknown", blocks the
+    // router on a network round trip, and the sign-in screen can appear for a
+    // frame before the real page arrives. The snapshot is never trusted for
+    // decisions — `maybeBootstrap` still revalidates against the backend, and
+    // the backend still refuses unauthenticated data with 401/403.
+    const cached = this.readCachedUser();
 
-  /**
-   * The startup check, shared so every waiter queues behind the same request.
-   *
-   * One promise however many callers: the app initializer starts it and each
-   * guard awaits it, and a second `GET /api/auth/me` would be a second chance
-   * for the answers to disagree.
-   */
-  private initPromise: Promise<void> | null = null;
+    if (cached) {
+      this.userState.set(cached);
+      this.statusState.set('authenticated');
+      this.identity.bindToAccount(cached.id);
+    }
+  }
+
+  private get baseUrl(): string {
+    return this.config.getApiBaseUrl();
+  }
 
   /** The signed-in person, or null. */
   readonly user = this.userState.asReadonly();
@@ -122,6 +153,21 @@ export class AuthService {
 
   /** Whether the signed-in person may reach the admin-only routes. */
   readonly isAdmin = computed(() => this.userState()?.role === 'admin');
+
+  /**
+   * Whether somebody is signed in whose role is not `admin`.
+   *
+   * Deliberately not `!isAdmin()`. That is also true while nobody is signed in, and
+   * the administration screens used the difference to tell a refusal apart from a
+   * blank page — so a signed-out visitor arriving on one was told their account did
+   * not have administrator access, which is a different claim entirely: nothing had
+   * been decided about an account, because there was not one to decide about.
+   *
+   * Answering "nobody" instead is what lets the guard send them to sign in, which is
+   * where that answer belongs. The screen says nothing until there is somebody to
+   * refuse.
+   */
+  readonly lacksAdminAccess = computed(() => this.isAuthenticated() && !this.isAdmin());
 
   /**
    * Where somebody lands after signing in, which depends on their role.
@@ -137,14 +183,16 @@ export class AuthService {
   readonly landingPath = computed(() => (this.isAdmin() ? '/admin' : '/'));
 
   /**
-   * Whether the startup auth check has settled. False from page load until the
-   * single `GET /api/auth/me` (or the decision that none is needed) resolves.
+   * Where to reach the assistant deliberately.
    *
-   * Guards wait on this rather than reading `isAuthenticated()` directly, and
-   * the shell shows a loading state while it is false, so neither the sign-in
-   * screen nor a protected page renders on a guess.
+   * A separate path from `landingPath`, and only because the front door now turns
+   * administrators away: `/` is where an administrator is redirected *from*, so a
+   * link to the assistant cannot point there or it would bounce straight back. An
+   * employee has no such redirect, but they are given this path too rather than a
+   * bare `/` so that one link works for both roles and there is a single place that
+   * knows which route reaches the assistant.
    */
-  readonly initialized = this.initializedState.asReadonly();
+  readonly assistantPath = computed(() => (this.isAdmin() ? '/ask' : '/'));
 
   /**
    * The one `GET /api/auth/me` per app load, however many callers ask for it.
@@ -159,6 +207,24 @@ export class AuthService {
   private refreshPromise: Promise<UserDto | null> | null = null;
 
   /**
+   * Counts the sessions this tab has ended, so an answer already on its way can tell
+   * whether it still describes anything.
+   *
+   * A `GET /me` cannot be taken back. It is fired while a session is believed to
+   * exist and answered whenever the network gets round to it, so signing out in
+   * between does not stop it arriving — it arrives with a user in it and puts the
+   * person back. That is not hypothetical here: changing an administrator's own
+   * password revokes every session server-side while leaving the access token good
+   * for up to fifteen minutes, so the request a guard had already sent came back
+   * with the administrator in it, minutes after they had asked to be signed out.
+   *
+   * A request notes the count it was sent under and drops its own answer if the
+   * count has moved on. The answer is not wrong about who that was; it is wrong
+   * about who is signed in now.
+   */
+  private sessionEpoch = 0;
+
+  /**
    * Whether the question can even be asked here.
    *
    * False during a server render. The session lives in cookies the browser holds, so
@@ -171,9 +237,13 @@ export class AuthService {
   /**
    * Whether this browser looks like it has a session, judged without a request.
    *
-   * Reads the readable hint cookie the backend sets beside the session cookies. It
-   * proves nothing on its own — it is a flag, not a credential — so the answer here
-   * is only ever "worth asking", never "signed in".
+   * Two hints, because neither covers every deploy. The readable cookie the
+   * backend sets beside the session cookies answers on a same-host setup, where
+   * frontend JavaScript can actually read the API's cookies. The remembered flag
+   * in storage answers everywhere else: it is written on this origin the moment
+   * a session is established, so a cross-site deploy still asks rather than
+   * concluding "signed out" on every reload. Both prove nothing on their own —
+   * the answer here is only ever "worth asking", never "signed in".
    *
    * Why this exists: without it, every signed-out visit to the sign-in screen had to
    * call `GET /api/auth/me` in order to be told it was not signed in. That is a
@@ -186,9 +256,37 @@ export class AuthService {
       return false;
     }
 
+    if (this.hasKnownSession()) {
+      return true;
+    }
+
+    if (this.readCachedUser() !== null) {
+      return true;
+    }
+
     return document.cookie
       .split(';')
       .some((pair) => pair.trim().startsWith(`${SESSION_HINT_COOKIE}=`));
+  }
+
+  /**
+   * Whether a session was established in this browser, as remembered here.
+   *
+   * Storage, not cookies, because this origin's storage is readable on every
+   * deploy while the API's cookies are only readable same-host. Best effort: a
+   * browser that refuses storage simply loses this hint, exactly as if no
+   * session had been established.
+   */
+  private hasKnownSession(): boolean {
+    if (!this.isBrowser) {
+      return false;
+    }
+
+    try {
+      return localStorage.getItem(KNOWN_SESSION_KEY) !== null;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -217,111 +315,18 @@ export class AuthService {
   }
 
   /**
-    * Runs the one startup auth check and records that it settled.
-    *
-    * Idempotent: the first caller starts it and every later caller — the app
-    * initializer, each guard, any test — queues behind the same promise, so
-    * there is exactly one `GET /api/auth/me` per page load, however many ask.
-    *
-    * Asked through the hint-aware path when there is no cached user, so a visitor
-    * with plainly no session settles without a request, exactly as the guards
-    * already did. A skipped request is not a skipped check: with no cookies there
-    * is nothing `/me` could have answered with, and firing it anyway would only
-    * log a 401 on every signed-out visit.
-    *
-    * When a previous visit cached its user, that answer is restored synchronously
-    * and the check is the background revalidation rather than a blocking question:
-    * the guards and the shell see who signed in on the first paint, with no round
-    * trip and no flash of the sign-in screen. The cache is trusted for the first
-    * paint only — the revalidation replaces it with the server's live answer, and
-    * a session that has since died still lands on the sign-in screen through the
-    * interceptor and the guards, just without having shown it to somebody who is
-    * signed in.
-    *
-    * Never rejects. A failed check (expired session, unreachable backend) is an
-    * answer — "nobody is signed in" — not a startup failure, and rejecting here
-    * would either hang the router on a promise that never settles or fail the
-    * whole application boot over a session that simply is not there.
-    *
-    * Safe on the server: `maybeBootstrap` resolves without a request there, so
-    * a server render is never held waiting on a call that could not succeed.
-    */
-  initialize(): Promise<void> {
-    if (!this.initPromise) {
-      const cached = this.restoreCachedUser();
-
-      if (cached) {
-        this.setUser(cached);
-        this.initializedState.set(true);
-        this.initPromise = Promise.resolve();
-
-        // Revalidate without holding the boot: the guards and the shell already
-        // have their answer. A live session stays exactly where it is; a dead one
-        // is cleared here and the guards move the person to the sign-in screen.
-        void this.bootstrap().then(
-          () => undefined,
-          () => undefined,
-        );
-
-        return this.initPromise;
-      }
-
-      // Chained rather than `void …finally` on purpose: awaiting this promise
-      // means the check has settled AND the flag says so. Resolving first and
-      // setting the flag a microtask later lets the router navigate on a promise
-      // that says "done" while the shell still says "checking".
-      this.initPromise = this.maybeBootstrap()
-        .then(
-          () => undefined,
-          () => undefined,
-        )
-        .finally(() => {
-          this.initializedState.set(true);
-        });
-    }
-
-    return this.initPromise;
-  }
-
-  /**
-   * Resolves once the startup auth check has settled, starting it if needed.
+   * Finds out who is signed in, once, by asking.
    *
-   * The guards call this before deciding anything. In production the app
-   * initializer has already started (usually finished) the check, so this is
-   * free; anywhere the initializer did not run — tests, a future entry point —
-   * this starts the check rather than hanging on one that never will.
+   * Prefers `maybeBootstrap`, which skips the request when there is plainly no
+   * session. Shared as a promise rather than left to each caller: the route guard
+   * and the app shell both need to know, and two calls could disagree if one landed
+   * before sign-in and the other after it.
+   *
+   * Does nothing on the server. The session is a pair of cookies in the browser and
+   * a server render has neither them nor the `document` the hint is read out of, so
+   * there is no question to answer there — only a round trip that could not succeed
+   * anyway. The guards treat that as "defer to the browser".
    */
-  whenInitialized(): Promise<void> {
-    if (this.initializedState()) {
-      return Promise.resolve();
-    }
-
-    return this.initialize();
-  }
-
-  /**
-    * Finds out who is signed in, once, by asking.
-    *
-    * Prefers `maybeBootstrap`, which skips the request when there is plainly no
-    * session. Shared as a promise rather than left to each caller: the route guard
-    * and the app shell both need to know, and two calls could disagree if one landed
-    * before sign-in and the other after it.
-    *
-    * A 401 here is not always "signed out": the access token lives fifteen minutes
-    * and the refresh token fourteen days, so a refresh hours after the last click
-    * routinely meets a dead access token beside a live refresh token. When nobody
-    * is known to be signed in yet — the ordinary refresh case, status still
-    * `unknown` — one refresh is attempted before concluding the session is over.
-    * When somebody already is (the cached-user revalidation), the interceptor has
-    * already had its own refresh attempt at that same 401, so trying again would
-    * present a rotated token as a replay and revoke the whole family: the 401
-    * stands as the answer.
-    *
-    * Does nothing on the server. The session is a pair of cookies in the browser and
-    * a server render has neither them nor the `document` the hint is read out of, so
-    * there is no question to answer there — only a round trip that could not succeed
-    * anyway. The guards treat that as "defer to the browser".
-    */
   bootstrap(): Promise<UserDto | null> {
     if (this.bootstrapPromise) {
       return this.bootstrapPromise;
@@ -331,24 +336,27 @@ export class AuthService {
       return Promise.resolve(null);
     }
 
-    const alreadyKnown = this.isAuthenticated();
+    const epoch = this.sessionEpoch;
 
     this.bootstrapPromise = firstValueFrom(
-      this.http.get<UserDto>(`${API_BASE_URL}/api/auth/me`, this.credentials()).pipe(
-        tap((user) => this.setUser(user)),
-        catchError(() => {
-          if (alreadyKnown) {
-            // The interceptor has already tried its refresh at this 401 (see
-            // above): repeating it here would look like token replay.
-            this.setUser(null);
-            return of(null);
+      this.http.get<UserDto>(`${this.baseUrl}/api/auth/me`, this.credentials()).pipe(
+        // The epoch is what makes a signed-out-in-the-meantime answer harmless: the
+        // person it names is no longer signed in, and setting them would undo that.
+        tap((user) => {
+          if (this.sessionEpoch === epoch) {
+            this.setUser(user);
           }
-
-          // The access token may simply have expired while the refresh token is
-          // still good. `refresh()` sets the user itself on either outcome, so
-          // there is nothing further to record here.
-          return from(this.refresh());
         }),
+        // A 401 here means the access cookie has expired, not necessarily that the
+        // session is over: the access token is deliberately short-lived and the
+        // refresh cookie outlives it. So one refresh is tried before concluding
+        // anything.
+        //
+        // Without this the browser sat in a loop it could not leave. The hint cookie
+        // said "worth asking", `/me` said 401, and the hint survived — so every
+        // reload asked again and got the same answer, for as long as the hint cookie
+        // lived. Clearing it is what stops the asking.
+        catchError(() => this.recoverFromExpiredAccess()),
       ),
     ).then((user) => {
       // The CSRF token is fetched whether or not anybody is signed in: the sign-in
@@ -363,27 +371,195 @@ export class AuthService {
     return this.bootstrapPromise;
   }
 
-  /** `POST /api/auth/login`. */
-  login(email: string, password: string): Observable<UserDto> {
+  /**
+   * Trades an expired access cookie for a new one, and gives up cleanly if it cannot.
+   *
+   * Returns the user on success and null when the session really is over, in which
+   * case the hint cookie is cleared so the next load does not ask again.
+   */
+  private async recoverFromExpiredAccess(): Promise<UserDto | null> {
+    const user = await this.refresh();
+
+    if (user === null) {
+      this.forgetSessionHint();
+    }
+
+    return user;
+  }
+
+  /**
+   * Proves the session cookies round-trip, right after signing in.
+   *
+   * A successful sign-in only proves the password was right: the session itself
+   * lives in cookies the browser has to keep and send back, and on some setups
+   * it does neither — third-party cookies blocked, for instance. Without this
+   * check the app navigates in as though everything worked and is bounced back
+   * to the sign-in screen seconds later, when the first authenticated call
+   * finds no session to speak of. Emits false in exactly that case, so the
+   * caller can say what is wrong instead of looping.
+   *
+   * Asked past the interceptor on purpose: a refusal here must not refresh or
+   * end the session it is inspecting, which is what the interceptor would do
+   * with it. Anything that is not a refusal — the backend unreachable — is left
+   * for the caller to decide, because a failed check is not a failed session.
+   */
+  verifySession(): Observable<boolean> {
+    if (!this.isBrowser) {
+      return of(false);
+    }
+
+    return this.raw
+      .get<UserDto>(`${this.baseUrl}/api/auth/me`, this.credentials())
+      .pipe(
+        map(() => true),
+        catchError((error: unknown) =>
+          (error as { status?: number } | null)?.status === 401
+            ? of(false)
+            : throwError(() => error),
+        ),
+      );
+  }
+
+  /**
+   * Removes the readable hint, so a signed-out browser stops looking signed in.
+   *
+   * The hint is only ever a hint — it decides whether asking is worth it and is never
+   * sent as proof of anything — so deleting it here cannot sign anybody out. It only
+   * stops the app asking a question whose answer it already has.
+   *
+   * The attributes have to match the ones the server set it with, or the browser
+   * treats it as a different cookie and leaves the original in place.
+   */
+  private forgetSessionHint(): void {
+    if (!this.isBrowser) {
+      return;
+    }
+
+    document.cookie = `${SESSION_HINT_COOKIE}=; path=/; max-age=0; samesite=lax`;
+  }
+
+  /**
+   * `POST /api/auth/login`.
+   *
+   * Emits `null` for an account that exists but is not switched on, which is a real
+   * answer and not a failure: the password was right, the account is simply waiting on
+   * an administrator. The backend only sends it once the password has verified, so
+   * nothing here has to guess — and nothing is stored on that answer. No session cookie
+   * came with it and no user is set, so a pending account cannot be mistaken for a
+   * signed-in one anywhere else in the app.
+   */
+  login(email: string, password: string): Observable<UserDto | null> {
     const body: LoginRequestDto = { email: email.trim(), password };
 
     return this.http
-      .post<UserResponseDto>(`${API_BASE_URL}/api/auth/login`, body, this.credentials())
+      .post<UserResponseDto | PendingApprovalDto>(
+        `${this.baseUrl}/api/auth/login`,
+        body,
+        this.credentials(),
+      )
       .pipe(
-        map((response) => response.user),
+        map((response) => {
+          if ('user' in response) {
+            return response.user;
+          }
+
+          this.pendingState.set(response);
+          this.rememberPending(response);
+
+          return null;
+        }),
         tap((user) => {
-          this.setUser(user);
-          // Sign-in rotates the CSRF cookie server-side, so the one held here is no
-          // longer the one the server expects.
-          this.loadCsrfToken();
+          if (user) {
+            this.pendingState.set(null);
+            this.forgetPending();
+            this.setUser(user);
+            // Sign-in rotates the CSRF cookie server-side, so the one held here is no
+            // longer the one the server expects.
+            this.loadCsrfToken();
+          }
         }),
       );
   }
 
-  /** `GET /api/auth/invite/{token}`. Used to pre-fill the accept screen. */
+  /**
+   * Keeps the waiting answer across a reload, in a readable cookie.
+   *
+   * The waiting screen has to survive a refresh, and neither a signal nor the URL does
+   * that. Not a credential and not a secret: it is the server's own answer about an
+   * account the caller has already proved they own, it grants nothing, and it is
+   * dropped the moment a sign-in succeeds.
+   */
+  private rememberPending(pending: PendingApprovalDto): void {
+    if (!this.isBrowser) {
+      return;
+    }
+
+    try {
+      document.cookie = `ika_pending=${btoa(
+        JSON.stringify(pending),
+      )}; path=/; samesite=lax; max-age=86400`;
+    } catch {
+      // Losing it costs a screen with no name on it after a reload, and nothing more.
+    }
+  }
+
+  /** Drops the waiting answer, now that there is a session to show instead. */
+  private forgetPending(): void {
+    if (!this.isBrowser) {
+      return;
+    }
+
+    document.cookie = `ika_pending=; path=/; max-age=0; samesite=lax`;
+  }
+
+  private readonly pendingFromCookie = (): PendingApprovalDto | null => {
+    if (!this.isBrowser) {
+      return null;
+    }
+
+    const match = document.cookie.match(
+      /(^|;\s*)ika_pending=([^;]*)/,
+    );
+
+    if (!match) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(atob(match[2]));
+    } catch {
+      return null;
+    }
+  };
+
+  private readonly pendingState = signal<PendingApprovalDto | null>(
+    this.isBrowser ? this.pendingFromCookie() : null,
+  );
+
+  /** Re-reads the pending cookie and updates the signal if the cookie exists. */
+  refreshPendingFromCookie(): void {
+    if (!this.isBrowser) {
+      return;
+    }
+
+    const data = this.pendingFromCookie();
+    if (data) {
+      this.pendingState.set(data);
+    }
+  }
+
+  /**
+   * What the last sign-in said about a request still waiting.
+   *
+   * Held on the service rather than in the navigation, so a refresh on the pending
+   * screen reads the same answer instead of arriving blank. Nothing about it is ever
+   * put in the URL: none of it belongs in an address bar.
+   */
+  readonly lastPending = this.pendingState.asReadonly();
+
   previewInvite(token: string): Observable<InvitePreviewDto> {
     return this.http.get<InvitePreviewDto>(
-      `${API_BASE_URL}/api/auth/invite/${encodeURIComponent(token)}`,
+      `${this.baseUrl}/api/auth/invite/${encodeURIComponent(token)}`,
       this.credentials(),
     );
   }
@@ -393,7 +569,7 @@ export class AuthService {
     const body: AcceptInviteRequestDto = { token, password };
 
     return this.http
-      .post<UserResponseDto>(`${API_BASE_URL}/api/auth/accept-invite`, body, this.credentials())
+      .post<UserResponseDto>(`${this.baseUrl}/api/auth/accept-invite`, body, this.credentials())
       .pipe(
         map((response) => response.user),
         tap((user) => {
@@ -404,41 +580,38 @@ export class AuthService {
   }
 
   /**
-   * `POST /api/auth/request-access`. Registers with a password, pending approval.
+  /**
+   * `POST /api/auth/request-access`. Asks an administrator for an account.
    *
    * Creates a request and nothing else: no account exists until somebody approves
-   * one, so nothing here can sign in yet. Approval moves the password onto the
-   * new account and activates it. That is what makes this safe to leave open,
-   * where a plain registration form would let anyone who could type a colleague's
-   * address claim it.
+   * one. That is what makes this safe to leave open, where a plain registration form
+   * would let anyone who could type a colleague's address claim it.
    *
    * A CSRF header is attached to it by the interceptor, unlike signing in. There is
    * nothing here that needs an exemption — the token comes from a public endpoint and
    * the frontend has one before this screen is reachable — so requiring it costs
    * nothing and closes a way to fill an administrator's queue from another site.
    */
-  requestAccess(name: string, email: string, password: string): Observable<AccessRequestSubmittedDto> {
-    const body: AccessRequestDto = { name: name.trim(), email: email.trim(), password };
-
-    return this.http.post<AccessRequestSubmittedDto>(
-      `${API_BASE_URL}/api/auth/request-access`,
-      body,
-      this.credentials(),
-    );
-  }
-
   /**
-   * `POST /api/auth/invite`. Administrators only.
+   * `POST /api/auth/request-access`. Registers, and asks for access in one step.
    *
-   * Returns the link rather than sending anything: there is no mail service, so the
-   * link is the deliverable and whoever holds it passes it on. See the admin invite
-   * screen for what that means in practice.
+   * The role is what the person is asking for and nothing more; the role they are
+   * given is decided by whoever approves the request.
    */
-  invite(name: string, email: string, role: Role): Observable<InviteResponseDto> {
-    const body: InviteRequestDto = { name: name.trim(), email: email.trim(), role };
+  requestAccess(
+    name: string,
+    email: string,
+    role: Role,
+    password: string,
+  ): Observable<AccessRequestSubmittedDto> {
+    const body: AccessRequestDto = { name: name.trim(), email: email.trim(), role, password };
 
-    return this.http.post<InviteResponseDto>(
-      `${API_BASE_URL}/api/auth/invite`,
+    // Nothing is remembered here. An earlier version wrote the request to
+    // `localStorage` so that a later sign-in could be recognised as "still waiting"
+    // from a generic refusal; the backend answers that case properly now, so the only
+    // thing the memory bought was a way to show the wrong screen on the wrong device.
+    return this.http.post<AccessRequestSubmittedDto>(
+      `${this.baseUrl}/api/auth/request-access`,
       body,
       this.credentials(),
     );
@@ -458,14 +631,87 @@ export class AuthService {
     const body: CreateAccountRequestDto = { name: name.trim(), email: email.trim(), role, password };
 
     return this.http
-      .post<UserResponseDto>(`${API_BASE_URL}/api/auth/accounts`, body, this.credentials())
+      .post<UserResponseDto>(`${this.baseUrl}/api/auth/accounts`, body, this.credentials())
       .pipe(map((response) => response.user));
+  }
+
+  /**
+   * `GET /api/auth/users`. Administrators only.
+   *
+   * A page at a time, with the page count alongside, so the pager cannot disagree
+   * with the server about how many accounts there are.
+   */
+  listUsers(page: number): Observable<UserListDto> {
+    return this.http.get<UserListDto>(
+      `${this.baseUrl}/api/auth/users?page=${page}`,
+      this.credentials(),
+    );
+  }
+
+  /** `PATCH /api/auth/users/{id}`. Corrects an account. Administrators only. */
+  updateUser(
+    userId: string,
+    changes: UserUpdateRequestDto,
+  ): Observable<UserSummaryDto> {
+    return this.http.patch<UserSummaryDto>(
+      `${this.baseUrl}/api/auth/users/${encodeURIComponent(userId)}`,
+      changes,
+      this.credentials(),
+    );
+  }
+
+  /** `DELETE /api/auth/users/{id}`. Administrators only. */
+  deleteUser(userId: string): Observable<void> {
+    return this.http
+      .delete<void>(
+        `${this.baseUrl}/api/auth/users/${encodeURIComponent(userId)}`,
+        this.credentials(),
+      )
+      .pipe(map(() => undefined));
+  }
+
+  /**
+   * `POST /api/auth/users/{id}/password`. Administrators only.
+   *
+   * Sets a new password for somebody locked out, and revokes every session they
+   * have open with it. Returns nothing: the password is not echoed back, so the
+   * only copy is the one the administrator typed.
+   */
+  resetPassword(userId: string, password: string): Observable<void> {
+    const body: PasswordResetRequestDto = { password };
+
+    return this.http
+      .post<void>(
+        `${this.baseUrl}/api/auth/users/${encodeURIComponent(userId)}/password`,
+        body,
+        this.credentials(),
+      )
+      .pipe(map(() => undefined));
+  }
+
+  /**
+   * `POST /api/auth/me/password`. Changes the signed-in person's own password.
+   *
+   * Any role, unlike `resetPassword` above: the current password proves
+   * possession, so a session left open cannot be used to lock its owner out. The
+   * backend revokes every session with it, so the caller signs out afterwards
+   * and the new password is what signs back in.
+   */
+  changeOwnPassword(currentPassword: string, newPassword: string): Observable<void> {
+    const body: ChangeOwnPasswordRequestDto = {
+      current_password: currentPassword,
+      new_password: newPassword,
+    };
+
+    return this.http
+      .post<void>(`${this.baseUrl}/api/auth/me/password`, body, this.credentials())
+      .pipe(map(() => undefined));
   }
 
   /** `GET /api/auth/requests`. Administrators only. */
   listAccessRequests(): Observable<AccessRequestListDto> {
     return this.http.get<AccessRequestListDto>(
-      `${API_BASE_URL}/api/auth/requests`,
+      `${this.baseUrl}/api/auth/requests`,
       this.credentials(),
     );
   }
@@ -480,7 +726,7 @@ export class AuthService {
     const body: AccessRequestDecisionRequestDto = { role };
 
     return this.http.post<AccessRequestDecisionDto>(
-      `${API_BASE_URL}/api/auth/requests/${encodeURIComponent(requestId)}/approve`,
+      `${this.baseUrl}/api/auth/requests/${encodeURIComponent(requestId)}/approve`,
       body,
       this.credentials(),
     );
@@ -489,7 +735,7 @@ export class AuthService {
   /** `POST /api/auth/requests/{id}/decline`. Administrators only. */
   declineAccessRequest(requestId: string): Observable<AccessRequestDecisionDto> {
     return this.http.post<AccessRequestDecisionDto>(
-      `${API_BASE_URL}/api/auth/requests/${encodeURIComponent(requestId)}/decline`,
+      `${this.baseUrl}/api/auth/requests/${encodeURIComponent(requestId)}/decline`,
       {},
       this.credentials(),
     );
@@ -498,24 +744,40 @@ export class AuthService {
   /**
    * `POST /api/auth/refresh`. Trades the refresh cookie for a new pair.
    *
-   * Returns null rather than throwing when the refresh is refused: a refresh that
-   * fails means the session is over, which the caller handles by sending the person
-   * to the sign-in screen, not by surfacing an error they could do anything about.
+   * Returns null rather than throwing when the refresh is refused: a refused
+   * refresh means the session is over, which the caller handles by sending the
+   * person to the sign-in screen, not by surfacing an error they could do
+   * anything about. Anything else — the backend unreachable, asleep, or
+   * erroring — is rethrown untouched: a network failure is not a session that
+   * ended, and treating it as one signed people out for trying to use the app
+   * while the backend was waking up.
    */
   refresh(): Promise<UserDto | null> {
     if (this.refreshPromise) {
       return this.refreshPromise;
     }
 
+    const epoch = this.sessionEpoch;
+
     this.refreshPromise = firstValueFrom(
       this.http
-        .post<UserResponseDto>(`${API_BASE_URL}/api/auth/refresh`, {}, this.credentials())
+        .post<UserResponseDto>(`${this.baseUrl}/api/auth/refresh`, {}, this.credentials())
         .pipe(
           map((response) => response.user),
-          tap((user) => this.setUser(user)),
-          catchError(() => {
-            this.setUser(null);
-            return of(null);
+          // Same reasoning as `bootstrap`: a refresh that was asked for before the
+          // session ended must not bring it back afterwards.
+          tap((user) => {
+            if (this.sessionEpoch === epoch) {
+              this.setUser(user);
+            }
+          }),
+          catchError((error: unknown) => {
+            if (isSessionRefusal(error)) {
+              this.setUser(null);
+              return of(null);
+            }
+
+            return throwError(() => error);
           }),
         ),
     ).finally(() => {
@@ -527,7 +789,7 @@ export class AuthService {
 
   /** `POST /api/auth/logout`. Ends the session server-side, then locally. */
   logout(): Observable<void> {
-    return this.http.post<void>(`${API_BASE_URL}/api/auth/logout`, {}, this.credentials()).pipe(
+    return this.http.post<void>(`${this.baseUrl}/api/auth/logout`, {}, this.credentials()).pipe(
       // The local session is ended even if the request failed. The user asked to
       // sign out, and leaving them apparently signed in because a network call
       // timed out would be the worse of the two answers.
@@ -540,8 +802,29 @@ export class AuthService {
     );
   }
 
-  /** The CSRF token to send with a state-changing request, or null if there is none. */
+  /** The CSRF token, as the backend last echoed it in a response body.
+   *
+   * Held in memory rather than read out of the cookie, because this app and the
+   * API are on different hosts and frontend JavaScript can never see the API's
+   * cookies: `document.cookie` only holds this origin's own. The browser still
+   * sends the cookie with every credentialed request (which is the half the
+   * server compares against); this is the half that goes in the header.
+   *
+   * The `/csrf` endpoint echoes the token it just set precisely so callers that
+   * cannot read the cookie do not have to.
+   */
+  private csrfMemory: string | null = null;
+
+  /** The CSRF token to send with a state-changing request, or null if there is none.
+   *
+   * Memory first, cookie as fallback (same-host development, where the cookie is
+   * readable and no body token may have been fetched yet).
+   */
   readCsrfToken(): string | null {
+    if (this.csrfMemory) {
+      return this.csrfMemory;
+    }
+
     if (!this.isBrowser) {
       return null;
     }
@@ -557,96 +840,74 @@ export class AuthService {
     return null;
   }
 
-  /** Forgets the current user without touching the server. */
+  /**
+   * Forgets the current user without touching the server.
+   *
+   * Also stops the app asking about a session it has just decided is over. The hint
+   * cookie outlives this call — it is the backend's to clear, and it only gets
+   * cleared when the revocation that follows lands — so without dropping it here a
+   * guard asked in the meantime would answer `/me`, and the access token that
+   * request carries is still good for up to fifteen minutes after its sessions were
+   * revoked. That is how signing out locally could put an administrator straight back
+   * on an admin screen, signed out of the account but with the page drawn for one.
+   */
   clear(): void {
+    this.forgetSessionHint();
     this.setUser(null);
   }
 
   /**
-    * Marks the session gone.
-    *
-    * The bootstrap promise is cleared as well as the user: it resolved to "signed
-    * out", and holding onto that answer would make the next guard that asks bounce
-    * straight to the sign-in screen without ever re-checking a cookie that may since
-    * have arrived.
-    *
-    * The cached user follows the live one in both directions: remembered on the
-    * way in so the next load starts from the right answer, forgotten on the way
-    * out so a signed-out browser never replays somebody into a session.
-    */
+   * Marks the session gone.
+   *
+   * The bootstrap promise is cleared as well as the user: it resolved to "signed
+   * out", and holding onto that answer would make the next guard that asks bounce
+   * straight to the sign-in screen without ever re-checking a cookie that may since
+   * have arrived.
+   */
   private setUser(user: UserDto | null): void {
+    // Bumped on every ending, never on a sign-in, so it counts sessions ended rather
+    // than requests sent. `bootstrap` and `refresh` compare against it and drop an
+    // answer that belongs to a session which is already over.
+    if (user === null) {
+      this.sessionEpoch += 1;
+    }
+
     this.userState.set(user);
     this.statusState.set(user ? 'authenticated' : 'anonymous');
+    // Threads belong to the account that made them: point the browser at this
+    // account's own id (or back at the anonymous one) so no account ever opens
+    // another's conversations on a shared browser.
+    this.identity.bindToAccount(user?.id ?? null);
+    this.rememberSession(user !== null);
+    this.cacheUser(user);
 
-    if (user) {
-      this.persistCachedUser(user);
-    } else {
+    if (!user) {
       this.bootstrapPromise = null;
-      this.clearCachedUser();
+      // A token from the previous session would only mismatch the next one.
+      this.csrfMemory = null;
     }
   }
 
   /**
-    * Remembers who signed in, in this browser's own storage.
-    *
-    * Browser-only and failure-silent: storage can be unavailable (private modes,
-    * disabled cookies-adjacent settings), and the session still works for the
-    * page's lifetime without it — the next load simply checks the server instead
-    * of starting from the answer.
-    */
-  private persistCachedUser(user: UserDto): void {
-    if (!this.isBrowser) {
-      return;
-    }
-
-    try {
-      localStorage.setItem(SESSION_CACHE_KEY, JSON.stringify(user));
-    } catch {
-      // The session is in the cookies and works regardless; only the fast
-      // restart is lost.
-    }
-  }
-
-  /** Forgets the remembered user, if any. */
-  private clearCachedUser(): void {
-    if (!this.isBrowser) {
-      return;
-    }
-
-    try {
-      localStorage.removeItem(SESSION_CACHE_KEY);
-    } catch {
-      // Nothing to do: the entry is either gone or unreadable, both of which
-      // read as "no memory".
-    }
-  }
-
-  /**
-    * Who the last load left signed in, if that memory parses.
-    *
-    * Validated rather than trusted: anything that is not exactly a user — a
-    * half-write, a value from an older shape, somebody else's key — reads as no
-    * memory and is dropped, so a corrupt entry can never sign anybody in, not
-    * even briefly.
-    */
-  private restoreCachedUser(): UserDto | null {
+   * The snapshot `maybeBootstrap` revalidates, or null when there is none.
+   *
+   * Validated rather than cast: storage is writable by anything on this origin,
+   * so a malformed entry must read as "no snapshot" rather than as a user.
+   * Only the four display fields are kept; anything resembling a token is
+   * ignored by construction because it is never written here.
+   */
+  private readCachedUser(): UserDto | null {
     if (!this.isBrowser) {
       return null;
     }
 
-    let raw: string | null = null;
-
     try {
-      raw = localStorage.getItem(SESSION_CACHE_KEY);
-    } catch {
-      return null;
-    }
+      const raw = localStorage.getItem(CACHED_USER_KEY);
 
-    if (!raw) {
-      return null;
-    }
+      if (!raw) {
+        return null;
+      }
 
-    try {
       const parsed = JSON.parse(raw) as Partial<UserDto> | null;
 
       if (
@@ -654,43 +915,108 @@ export class AuthService {
         typeof parsed.id !== 'string' ||
         typeof parsed.name !== 'string' ||
         typeof parsed.email !== 'string' ||
-        (parsed.role !== 'admin' && parsed.role !== 'employee')
+        (parsed.role !== 'employee' && parsed.role !== 'admin')
       ) {
-        localStorage.removeItem(SESSION_CACHE_KEY);
-
         return null;
       }
 
       return { id: parsed.id, name: parsed.name, email: parsed.email, role: parsed.role };
     } catch {
-      try {
-        localStorage.removeItem(SESSION_CACHE_KEY);
-      } catch {
-        // Already handling a corrupt entry; a storage that will not even clear
-        // is simply treated as empty from here on.
-      }
-
       return null;
     }
   }
 
+  /** Keeps the snapshot in step with the session, or removes it on sign-out. */
+  private cacheUser(user: UserDto | null): void {
+    if (!this.isBrowser) {
+      return;
+    }
+
+    try {
+      if (user) {
+        localStorage.setItem(
+          CACHED_USER_KEY,
+          JSON.stringify({ id: user.id, name: user.name, email: user.email, role: user.role }),
+        );
+      } else {
+        localStorage.removeItem(CACHED_USER_KEY);
+      }
+    } catch {
+      // Best effort, like every other use of storage here: losing the snapshot
+      // only costs the instant first paint, never correctness.
+    }
+  }
+
   /**
-   * Asks for a CSRF token, which arrives as the readable cookie the interceptor
-   * picks it up from.
+   * Records whether a session was established in this browser.
+   *
+   * Written the moment anybody is set and removed the moment nobody is, so a
+   * reload asks the backend instead of guessing — including on a cross-site
+   * deploy where the hint cookie is unreadable. Best effort, like every other
+   * use of storage here: losing the flag only costs one avoided question.
+   */
+  private rememberSession(established: boolean): void {
+    if (!this.isBrowser) {
+      return;
+    }
+
+    try {
+      if (established) {
+        localStorage.setItem(KNOWN_SESSION_KEY, '1');
+      } else {
+        localStorage.removeItem(KNOWN_SESSION_KEY);
+      }
+    } catch {
+      // Remembering is a courtesy. A browser that refuses storage still gets the
+      // right answer from the server; it just always pays a request for it.
+    }
+  }
+
+  /**
+   * Asks for a CSRF token, keeping the echoed body value.
    *
    * Subscribed here rather than returned, because an `HttpClient` request is cold:
-   * building one and not subscribing to it sends nothing at all. Nothing needs the
-   * value — the cookie is the store, and the interceptor reads it back at the
-   * moment it needs it — so a failure here is swallowed rather than surfaced.
-   * Duplicating the token in memory would create a second copy of a secret that
-   * exists precisely so that only the server and this cookie hold it.
+   * building one and not subscribing to it sends nothing at all. A failure here is
+   * swallowed rather than surfaced: callers that need the value use
+   * `refreshCsrfToken` and await it instead.
    */
+  /**
+   * Fetches a new CSRF token, for a request refused with a stale one.
+   *
+   * Public because the interceptor is what discovers the refusal, and it has to be
+   * able to recover without the caller knowing anything went wrong.
+   */
+  refreshCsrfToken(): Observable<void> {
+    if (!this.isBrowser) {
+      return of(undefined);
+    }
+
+    // Awaitable, and that is the whole point. The caller has to use the token
+    // *after* the browser has stored its cookie twin, and sending a header read
+    // before that gets the value that was just refused, which fails again for
+    // exactly the same reason and looks like the fix doing nothing. The body
+    // carries the token, so there is no cookie to wait on.
+    return this.http
+      .get<CsrfResponseDto>(`${this.baseUrl}/api/auth/csrf`, this.credentials())
+      .pipe(
+        tap((response) => {
+          this.csrfMemory = response.csrf_token;
+        }),
+        map(() => undefined),
+        // A refresh that fails is not worth a second exception on top of the first.
+        catchError(() => of(undefined)),
+      );
+  }
+
   private loadCsrfToken(): void {
     if (!this.isBrowser) {
       return;
     }
 
-    this.http.get<CsrfResponseDto>(`${API_BASE_URL}/api/auth/csrf`, this.credentials()).subscribe({
+    this.http.get<CsrfResponseDto>(`${this.baseUrl}/api/auth/csrf`, this.credentials()).subscribe({
+      next: (response) => {
+        this.csrfMemory = response.csrf_token;
+      },
       error: () => undefined,
     });
   }
@@ -705,4 +1031,18 @@ export class AuthService {
   private credentials(): { withCredentials: boolean } {
     return { withCredentials: true };
   }
+}
+
+/**
+ * Whether a failed refresh means the session is over.
+ *
+ * Only a refusal does — 401 from the refresh route, 403 defensively. Anything
+ * else (unreachable backend, timeout, 5xx) says nothing about the session, so
+ * it must travel back to the caller as the transient failure it is rather
+ * than being converted into a logout.
+ */
+function isSessionRefusal(error: unknown): boolean {
+  const status = (error as { status?: number } | null)?.status;
+
+  return status === 401 || status === 403;
 }

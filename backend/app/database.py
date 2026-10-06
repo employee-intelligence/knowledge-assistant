@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     create_engine,
@@ -30,6 +31,20 @@ class Conversation(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     client_id: Mapped[str] = mapped_column(String(64), index=True)
+    # The account that owns it, and the only thing that decides that.
+    #
+    # Ownership used to be `client_id` alone, which is a value the browser
+    # supplies and the server never checks against anything. Two accounts on one
+    # browser therefore opened each other's threads. The account is known to the
+    # server from the session, so it is what a conversation belongs to;
+    # `client_id` is still recorded beside it because the client sends it and
+    # the sidebar groups by it, but it grants nothing.
+    #
+    # Nullable only so rows written before this column existed still open; they
+    # are readable by nobody, because a conversation with no known owner cannot
+    # be shown to a caller without guessing. There is nothing to migrate them
+    # onto. Added to live tables by `_ensure_missing_columns` on startup.
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None, index=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -55,6 +70,23 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
+    # How the assistant's turn was answered, on an assistant message and null on
+    # a question. Recorded so a reloaded thread renders the same card it did as
+    # it streamed: a greeting cites nothing, and without this it is
+    # indistinguishable from a genuine gap in the corpus. Added to live tables by
+    # `_ensure_missing_columns` on startup.
+    status: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
+    # How closely the retrieved passages matched the question, 1-10, on an
+    # assistant message that was built from them and null on every turn that was
+    # not: a question, a greeting, a refusal, an out-of-scope reply, or a gap in
+    # the corpus.
+    #
+    # Null rather than zero for those, because a low number beside an answer with
+    # no sources behind it would read as a poor answer rather than as the absence
+    # of one — there was nothing to match, which is a different thing from
+    # matching badly. Stored so a reloaded thread shows the same figure the stream
+    # did. Added to live tables by `_ensure_missing_columns` on startup.
+    confidence: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -208,8 +240,8 @@ class AccessRequest(Base):
 Index("ix_refresh_sessions_user_live", RefreshSession.user_id, RefreshSession.revoked_at)
 
 
-def create_conversation(db: SessionLocal, client_id: str) -> Conversation:
-    conversation = Conversation(id=uuid4().hex, client_id=client_id)
+def create_conversation(db: SessionLocal, client_id: str, user_id: str) -> Conversation:
+    conversation = Conversation(id=uuid4().hex, client_id=client_id, user_id=user_id)
     db.add(conversation)
     db.commit()
     db.refresh(conversation)
@@ -217,18 +249,65 @@ def create_conversation(db: SessionLocal, client_id: str) -> Conversation:
 
 
 def get_owned_conversation(
-    db: SessionLocal, conversation_id: str, client_id: str
+    db: SessionLocal, conversation_id: str, user_id: str
 ) -> Conversation | None:
-    """The conversation, but only if it belongs to the calling client.
+    """The conversation, but only if it belongs to the calling account.
 
     Conversations carry no shared secret, so ownership is the whole boundary:
-    a client that knows an id it does not own is answered exactly like a client
+    an account that knows an id it does not own is answered exactly like one
     that guessed an id that never existed, instead of being told it exists.
     """
     conversation = db.get(Conversation, conversation_id)
-    if conversation is None or conversation.client_id != client_id:
+    if conversation is None or conversation.user_id != user_id:
         return None
     return conversation
+
+
+def list_owned_conversations(db: SessionLocal, user_id: str) -> list[Conversation]:
+    """This account's conversations with something in them, most recently active first.
+
+    Only conversations holding at least one message are listed: a row exists from
+    the moment it is created, so an abandoned one would otherwise sit in the
+    sidebar forever as a thread nobody asked for.
+    """
+    return list(
+        db.scalars(
+            select(Conversation)
+            .where(Conversation.user_id == user_id, Conversation.messages.any())
+            .order_by(Conversation.updated_at.desc())
+        ).all()
+    )
+
+
+def recent_turns(db: SessionLocal, conversation_id: str, limit: int = 4) -> list[tuple[str, str]]:
+    """The last few messages of a conversation, oldest first, as `(role, text)`.
+
+    What a follow-up is recognised by. "And if I'm part-time?" says nothing about
+    the company on its own, so without this the assistant has no way to tell it
+    from a fresh question about part-time staff and retrieves it as written.
+
+    Bounded: the window is the last few messages rather than the whole thread,
+    because the classification call runs on every question and an unbounded history
+    would make its cost grow with the conversation. A window this short is enough
+    to carry the topic of the previous exchange, which is all a follow-up needs.
+
+    Assistant messages are included even though the classification prompt only
+    needs the question. The answer is what tells the follow-up what the previous
+    exchange actually settled, so a window of alternating pairs carries more than
+    the same number of questions alone would.
+
+    Truncation of the individual messages is the caller's business, not this
+    function's: it is a prompt concern, and what belongs in a stored conversation
+    is the message as written.
+    """
+    rows = db.scalars(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.desc())
+        .limit(limit)
+    ).all()
+
+    return [(row.role, row.content) for row in reversed(rows)]
 
 
 def touch(db: SessionLocal, conversation: Conversation) -> None:
@@ -270,6 +349,29 @@ def find_open_access_request(db: SessionLocal, email: str) -> AccessRequest | No
         .order_by(AccessRequest.requested_at.desc())
         .limit(1)
     )
+
+
+def revoke_all_sessions(db: SessionLocal, user_id: str) -> int:
+    """Ends every live session for an account, and says how many it ended.
+
+    Used when a password is reset: a reset that leaves the old sessions running
+    resets nothing, because whoever prompted it — or whoever copied the cookie —
+    is still signed in. Revoked rather than deleted, so the rows remain as a
+    record that a session once existed and was ended deliberately.
+    """
+    now = datetime.now(timezone.utc)
+    live = db.scalars(
+        select(RefreshSession).where(
+            RefreshSession.user_id == user_id, RefreshSession.revoked_at.is_(None)
+        )
+    ).all()
+
+    for session in live:
+        session.revoked_at = now
+
+    db.commit()
+
+    return len(live)
 
 
 def revoke_family(db: SessionLocal, family_id: str) -> int:

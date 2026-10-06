@@ -16,22 +16,15 @@ type Decision = boolean | UrlTree;
  * The service is resolved before the first `await` on purpose. `inject()` only works
  * synchronously inside the context a guard is called in, so reaching for it after a
  * pause has already lost that context and throws.
+ *
+ * When the backend cannot be reached at all, the last known state stands rather
+ * than a guess: a failed request is not a session that ended, so it must not send
+ * a signed-in person to the sign-in screen. The route's own data calls will
+ * surface the outage as the retryable failures they are.
  */
 async function hasSession(): Promise<boolean> {
   const auth = inject(AuthService);
-
-  // The startup check first. On a full page refresh every signal is back to its
-  // initial value, so reading `isAuthenticated()` before the one `GET
-  // /api/auth/me` resolves sees "no user yet" and answers "signed out" — a race,
-  // not a refusal. The guard queues behind the real response instead, which is
-  // what keeps a refresh from flashing through the sign-in screen. No timeout is
-  // involved: this resolves when the API answers, however fast or slow that is.
-  //
-  // Nothing is asked twice here: `whenInitialized` settles the one check and the
-  // decision reads what it found. Asking again after a failed check would fire a
-  // second `/me` for the answer already in hand — the latch a failure clears is
-  // what makes the retry look necessary, and it is not.
-  await auth.whenInitialized();
+  const router = inject(Router);
 
   // A server render cannot answer this: the cookies are in the browser and a render
   // has neither them nor the answer. This is also what keeps a prerender from
@@ -40,18 +33,53 @@ async function hasSession(): Promise<boolean> {
     return false;
   }
 
+  // Restored from the cached snapshot: the right page is already on screen, so
+  // answering now is what keeps a refresh from flashing the sign-in screen while
+  // the revalidation is still in flight.
+  //
+  // Not a hole. The revalidation still runs, and if it concludes the session is
+  // over it clears the user and this sends them to the sign-in screen — the same
+  // destination a data call's 401 would have produced, just reached without
+  // showing them a page that cannot load. Getting there early is the point;
+  // getting there is not optional.
+  if (auth.isAuthenticated()) {
+    void revalidateOrSignOut(auth, router);
+
+    return true;
+  }
+
   // Asked through the hint-aware path, so a visitor with no session is told so
   // without a request. That matters most on the signed-out screens, where the
   // question is usually answered by the absence of a cookie.
-  //
-  // Reached only when the startup check left the session still unknown, which it
-  // never does today — `initialize` always settles it — so this is the backstop
-  // for a future check that settles some other way, not a second question.
-  if (auth.status() === 'unknown') {
+  try {
     await auth.maybeBootstrap();
+  } catch {
+    return auth.isAuthenticated();
   }
 
   return auth.isAuthenticated();
+}
+
+/**
+ * Confirms a restored session in the background, and ends it if it is gone.
+ *
+ * A request that never reached the backend is not a session that ended, so it is
+ * swallowed: the page stays, its own data calls surface the outage as the
+ * retryable failures they are, and the next attempt revalidates. Only a settled
+ * "signed out" is a real answer and sends them to the sign-in screen.
+ */
+async function revalidateOrSignOut(auth: AuthService, router: Router): Promise<void> {
+  try {
+    await auth.maybeBootstrap();
+  } catch {
+    return;
+  }
+
+  if (auth.isAuthenticated()) {
+    return;
+  }
+
+  void router.navigate(['/login'], { queryParams: { returnUrl: router.url } });
 }
 
 /**
@@ -80,6 +108,41 @@ async function decideForAppRoutes(): Promise<Decision> {
 
 /** Keeps signed-out visitors off the app's routes. */
 export const authGuard: CanActivateFn = () => decideForAppRoutes();
+
+/**
+ * Sends an administrator arriving at the app's front door to the dashboard.
+ *
+ * On the root route rather than at sign-in, so it covers every way in: the sign-in
+ * screen, a bookmark, a pasted link, and the guard handing somebody back the page
+ * they were bounced off. Fixing it in the login screen alone would leave an
+ * administrator who opens the app on `/` — which is what a browser does with the
+ * address they have bookmarked — looking at a chat screen they have to navigate out
+ * of.
+ *
+ * Only the front door is redirected. Reaching the assistant is a decision, and it
+ * stays reachable at `/ask`; redirecting the root alone is what keeps the sidebar's
+ * own "Ask" link working instead of bouncing an administrator straight back here.
+ */
+export const landingGuard: CanActivateFn = async () => {
+  const auth = inject(AuthService);
+  const router = inject(Router);
+
+  // Deferred to the browser for the same reason `adminGuard` defers: a server render
+  // knows nobody's role, so answering "not an administrator" here would redirect
+  // every administrator on every full page load. The moment the client takes over
+  // this runs again with a real answer.
+  if (!auth.isBrowserOnly()) {
+    return true;
+  }
+
+  const allowed = await decideForAppRoutes();
+
+  if (allowed !== true) {
+    return allowed;
+  }
+
+  return auth.isAdmin() ? router.createUrlTree([auth.landingPath()]) : true;
+};
 
 /**
  * Keeps signed-in people away from the administrator screens.

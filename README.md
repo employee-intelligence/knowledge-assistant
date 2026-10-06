@@ -37,9 +37,10 @@ backend/
 │   ├── bootstrap_admin.py # Creates the first administrator, from a shell
 │   └── rag/
 │       ├── __init__.py
-│       ├── engine.py      # RAG assistant (retrieve + generate)
-│       ├── guard.py       # Personal-question filter
-│       └── ingest.py      # Document loading & indexing
+│       ├── engine.py      # RAG assistant (classify + retrieve + generate)
+│       ├── guard.py       # Message classification (greeting / question / follow-up / out of scope)
+│       ├── ingest.py      # Document loading & indexing
+│       └── retrieval.py   # Hybrid retrieval: vector + keyword, merged with RRF
 ├── data/                  # Policy markdown documents (13 files)
 │   ├── 00-README.md
 │   ├── 01-company-overview.md
@@ -50,7 +51,10 @@ backend/
 ├── tests/
 │   ├── test_auth.py        # Auth, at the level of the HTTP contract
 │   ├── test_conversations.py
-│   └── test_engine_stream.py
+│   ├── test_engine_stream.py
+│   ├── test_greeting.py    # Greetings answered without retrieval
+│   ├── test_hybrid_retrieval.py  # Both searches, and their fusion
+│   └── test_intent.py      # Which path a message takes before retrieval
 ├── Dockerfile
 ├── requirements.txt
 ├── .env.example
@@ -106,6 +110,54 @@ Everyone else joins by invitation: sign in as an administrator and use
 `POST /api/auth/invite`. It returns the invitation link, because no mail service is
 configured — an administrator copies it and sends it themselves.
 
+### Opening the app from a phone
+
+The backend runs on `127.0.0.1:8000` and the app on `4200`. To use the app on a
+phone, serve the app on your wifi and open it by your machine's LAN address:
+
+```bash
+npm run start:dev -- --host 0.0.0.0 --port 4200
+```
+
+Then on the phone, `http://<your-machine-ip>:4200`. The dev-server proxy forwards
+`/api` to the backend, so the phone only ever talks to one origin and needs no
+extra configuration — not even an entry in an allow-list, because the request
+arrives at the backend naming the host the app itself was served at.
+
+A refusal names the origin it did not recognise, so a mistyped address is a 403
+that tells you what to fix rather than one that looks like a broken interceptor.
+
+### Where the API is, and why the phone was different
+
+`frontend/public/config.json` is `""`, which means the app serves `/api` from its
+own origin: the dev-server proxy in `proxy.conf.json` in development, and the
+Express reverse proxy in `src/server.ts` in production. The backend's address is
+`API_ORIGIN`, and the browser is never told it — every request it makes is to the
+address the page came from.
+
+That is what makes the session stick. The session is `httpOnly` cookies, and a
+cookie is attached based on the *site* a request goes to. With the browser calling
+the backend on its own origin, those cookies are first-party, and no browser policy
+is left to get wrong: Safari's ITP and Chrome's third-party-cookie phase-out both
+apply to third-party cookies, and both apply to them differently per browser and per
+device. `AUTH_COOKIE_SAMESITE` therefore defaults to `lax`, which works because the
+request is same-site by construction rather than by luck.
+
+The earlier version of this had the browser call
+`https://knowledge-assistant-chatbot.onrender.com` directly, which made the cookies
+third-party, and it worked on some desktops and failed on phones with nothing in the
+code to explain the difference. `AUTH_COOKIE_SAMESITE=none` is still available for an
+API the browser genuinely has to reach on an origin of its own; it is refused when it
+would be issued without `Secure`, because every browser drops that combination
+silently and still answers `200`.
+
+One trap is left, and it is the one nobody suspects: the backend marks its cookies
+`Secure` in production, and a browser will not store a `Secure` cookie for a page
+served over plain http — it drops it without a word, so sign-in still answers `200`
+and the next call answers `401`. Running the app over http therefore needs a local
+backend, which serves its cookies without `Secure`. The proxy does not change this:
+it is the page's scheme that decides, not the hop behind it.
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -120,7 +172,7 @@ configured — an administrator copies it and sends it themselves.
 | `LLM_MAX_ATTEMPTS` | No | `3` | Attempts before a 429/5xx is given up on |
 | `EMBED_MODEL` | No | `nvidia/nemotron-3-embed-1b` | Model used for retrieval embeddings |
 | `DATABASE_URL` | No | `postgresql://user:password@localhost:5432/knowledge_assistant` | PostgreSQL connection string |
-| `ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS origins. Must be listed explicitly in production: cookies are not sent to a wildcard. |
+| `ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS origins. Needed in production because the CSRF origin check compares against it. The browser itself reaches the API through the app's own `/api` proxy, so this no longer governs whether cookies are sent |
 | `ENVIRONMENT` | No | `development` | `production` forces `Secure` cookies and refuses the seeded admin |
 | `AUTH_SECRET_KEY` | Yes | — | Signs both token types. At least 32 characters |
 | `COMPANY_EMAIL_DOMAIN` | No | `acmetech.example` | The only domain an account may be created against |
@@ -129,12 +181,17 @@ configured — an administrator copies it and sends it themselves.
 | `INVITE_TTL_SECONDS` | No | `259200` | How long an invitation can be opened (72 hours) |
 | `BCRYPT_ROUNDS` | No | `12` | Password hashing cost |
 | `AUTH_COOKIE_SECURE` | No | `true` | `false` only for local http. Production forces it on regardless |
-| `CSRF_TRUSTED_ORIGINS` | No | falls back to `ALLOWED_ORIGINS` | Origins allowed to make cookie-authenticated writes. Must match the app's origin exactly — `localhost` and `127.0.0.1` are different, and a mismatch shows up as a 403 rather than an error |
+| `AUTH_COOKIE_SAMESITE` | No | `lax` | `SameSite` on the session cookies. `lax` is correct here because the app serves its own `/api` reverse proxy, so every request is same-site. `none` is only for an API the browser must call on another origin, and it makes the cookies third-party — which is what browsers increasingly refuse to send |
+| `CSRF_TRUSTED_ORIGINS` | No | falls back to `ALLOWED_ORIGINS` | Origins allowed to make cookie-authenticated writes. Must match the app's origin exactly — `localhost` and `127.0.0.1` are different, and a mismatch shows up as a 403 that names the origin it refused |
 | `FRONTEND_BASE_URL` | No | `http://localhost:4200` | Where an invitation link points |
 | `AUTH_BOOTSTRAP_KEY` | No | — | Guards the one route that can create the first administrator. Prefer `python -m app.bootstrap_admin` |
 | `AUTH_SEED_ADMIN_EMAIL` / `_PASSWORD` / `_NAME` | No | — | Seeds an administrator at startup. Ignored when `ENVIRONMENT=production` |
-| `TOP_K` | No | `4` | Number of documents to retrieve |
-| `MIN_SCORE` | No | `0.40` | Minimum similarity score threshold |
+| `MIN_SCORE` | No | `0.40` | Minimum vector-similarity score. Tied to `EMBED_MODEL` |
+| `RECALL_FLOOR` | No | `0.15` | When nothing clears `MIN_SCORE`, chunks above this are still passed to the generator to rule on. A recall setting, not a relevance one — see below |
+| `RECALL_CANDIDATES` | No | `4` | How many such chunks are passed on |
+| `VECTOR_CANDIDATES` | No | `10` | How far down the vector search looks. Also the window a keyword hit may rescue from |
+| `KEYWORD_CANDIDATES` | No | `10` | The same, for the keyword search |
+| `KEYWORD_MIN_SCORE` | No | `2.0` | Minimum BM25 score. A corpus-size scale, not a similarity one, so it is not comparable with `MIN_SCORE` |
 | `DATA_DIR` | No | `data` | Path to policy documents |
 
 `AUTH_SECRET_KEY` can be generated with:
@@ -239,6 +296,95 @@ Failures are reported rather than swallowed: a 429 or 5xx is retried with
 exponential backoff, and once the attempts are used up `/chat` answers 503 and
 writes no history row. `/health` reports `degraded` when the generation key is
 missing and `embedding_configured` for the retrieval key.
+
+## How a question is answered
+
+Two decisions happen before anything is retrieved, and both of them exist because
+the alternative was an answer that was wrong rather than one that was missing.
+
+**Which of four things is this message?** The classifier (`app/rag/guard.py`) sees
+the message *and the last few turns of the conversation*, because a follow-up
+cannot be recognised from its own words — "and if I'm part time?" is a complete,
+in-scope, self-contained question that only means something because of what came
+before it.
+
+| Category | Example | What happens |
+| --- | --- | --- |
+| Greeting | "hello", "thanks" | A short introduction. No retrieval. |
+| Question | "How many sick days do I get?" | Retrieved and answered from the documents, with citations. |
+| Follow-up | "anything else I should know?" | Rewritten into a standalone question first — *what else does the Code of Conduct document cover?* — then retrieved as above. |
+| Out of scope | "how many presidents has Ghana had?" | A statement of what the assistant is for. No retrieval. |
+
+A follow-up is rewritten rather than retrieved as written because "anything else"
+matches nothing in any document, which is how a follow-up used to end as a
+false "not found in the company documents".
+
+Out of scope and not-found say opposite things, and are kept apart deliberately:
+*not found* means the documents do not cover an in-scope question, so HR can
+supply the missing policy; *out of scope* means the question was never something
+HR has an answer to, so sending somebody there would be actively unhelpful.
+
+**Which chunks answer it?** Retrieval is hybrid (`app/rag/retrieval.py`). Vector
+similarity and BM25 keyword matching each return candidates, and the two ranked
+lists are merged by Reciprocal Rank Fusion — `1/(60 + rank)` per list, summed.
+They cover opposite failures: vector search finds "annual leave" in a chunk headed
+"Paid Time Off", and keyword search finds a chunk containing the literal "Code of
+Conduct" that the vector search under-ranked. Fusing on *rank* rather than score
+is what makes the merge possible, because cosine similarity and BM25 are not on
+the same scale and cannot be averaged.
+
+A chunk that only one search found still competes rather than being discarded —
+that is the case worth having, and it is the exact-term hit the other search
+buried. `grievance` is the live example: the vector search scores the right chunk
+at 0.149, far under the floor, and the keyword half is what puts it in front of the
+generator.
+
+One rule qualifies that, because it is not obvious: **a keyword hit may only
+rescue a chunk the vector search actually returned.** It need not score above
+`min_score` — under-scoring is the case being rescued — but it must have been
+considered. On a corpus this small, BM25's IDF is a weaker signal than it is over
+a large document collection: a light verb appearing in four chunks scores as "rare"
+as a policy name appearing in four. Left unchecked, "what do I get paid for my
+work?" put the IT & VPN guide first on the strength of "get" and "work" alone —
+terms whose similarity to that chunk is 0.163 — and the generator was handed a VPN
+guide in answer to a question about pay. `min_score` does not catch it, because it
+applies to what the vector search returned and that chunk was not returned at all.
+
+`VECTOR_CANDIDATES` is therefore load-bearing beyond ranking: it is the window a
+rescue may come from, so reducing it removes candidates rather than reordering
+them. It must be at least 10 for this corpus — at `top_k`=4 the vector search only
+ever saw four chunks, and `grievance` was not among them.
+
+### Why `MIN_SCORE` was not lowered
+
+Because on this embedding model the two cases cannot be separated by score. Best
+chunk cosine, measured:
+
+| | question | best cosine |
+| --- | --- | --- |
+| Answerable | What do I get paid for my work? | 0.307 |
+| Answerable | How much do I earn? | 0.222 |
+| Answerable | What is the notice period? | 0.269 |
+| Unanswerable | How many dentists does the company have? | 0.323 |
+| Unanswerable | What is the weather in Accra? | 0.295 |
+
+The ranges overlap. Any threshold low enough to admit the answerable rows also
+admits the unanswerable ones, and the corpus starts answering from the nearest
+irrelevant document. A relative threshold ("at least 70% of the best score") was
+implemented and measured: it produces **zero difference**, because it can only ever
+lower the floor for a weak query — it can never admit a chunk the vector search
+did not return.
+
+So `MIN_SCORE` stays at 0.40 and `RECALL_FLOOR` handles the gap instead. When no
+chunk clears `MIN_SCORE`, the best ones above `RECALL_FLOOR` are still handed to
+the generator. The generator already decides `NOT_FOUND` when handed irrelevant
+chunks — that is verified, not assumed — so the judgement goes where it can be
+made well. A question with a real match above `MIN_SCORE` never reaches this path
+at all, which is why no answer that works today changes.
+
+`MIN_SCORE` and `KEYWORD_MIN_SCORE` are separate floors because the two scores are
+not comparable. Raising either makes questions look "not found" with no error
+anywhere, so change them with the corpus in mind.
 
 ## API Endpoints
 
@@ -387,7 +533,45 @@ JSON object per `data:` line:
 | `status` | The answer is being written, before any of it exists yet. |
 | `delta` | A piece of the answer text. Repeat until `done`. |
 | `done` | The complete answer and its citations. Sent exactly once, and it is the authoritative one. |
+| `title` | The conversation's name, after the first exchange only. |
 | `error` | The answer could not be finished. Any partial text stays visible. |
+
+`done` carries a `status` naming what the turn turned out to be, so a client can
+draw each outcome as its own thing rather than inferring it:
+
+| `status` | Meaning | Cites |
+| --- | --- | --- |
+| *(absent)* | Answered from the documents. | Yes |
+| `not-found` | In scope, and the documents do not cover it. HR owns the gap. | No |
+| `out-of-scope` | Never something this assistant answers. Not a gap in the corpus. | No |
+| `restricted` | The asker's own records, which are not shared through here. | No |
+| `greeting` | Small talk, answered without retrieval. | No |
+
+The wire spells these in `kebab-case`, and a client should treat an unrecognised
+one as an ordinary answer rather than as a failure.
+
+`done` also carries `confidence`: how closely the retrieved passages matched the
+question, **1 to 10**, or `null`.
+
+It is derived from the similarity of the best chunk that was retrieved, and it is
+deliberately not a probability that the answer is right — nothing in the pipeline
+knows that, since the figure is computed before the model is called at all. What it
+reports is the quality of the evidence, which is why the two are separated: a
+well-matched passage set that the model then answered wrongly still scores high,
+and a correct answer drawn from a marginal match still scores low.
+
+The scale is anchored on measurements from this corpus with this embedding model:
+`RECALL_FLOOR` (0.15) at the bottom, and 0.70 at the top. So `MIN_SCORE` of 0.40
+lands **mid-scale** — a good answer reports about 5/10, not 8/10. That reads low,
+and it is the honest reading. `grievance` scores 1/10 because the chunk that
+answers it has a cosine of 0.149: the answer is right and the match is marginal,
+and the figure is about the second of those.
+
+`null` is returned for every turn built from no passages — a greeting, a refusal,
+an out-of-scope reply, or a question the corpus does not cover. Not `0`: there
+was nothing to match, which is a different thing from matching badly, and a low
+number beside an answer with no sources would read as a poor answer rather than as
+the absence of one.
 
 ```
 data: {"type":"status","stage":"writing"}
@@ -511,11 +695,65 @@ curl http://localhost:8000/history/test-session-123
 
 ## Deployment (Render)
 
-The `render.yaml` at the repo root configures both the web service and PostgreSQL database automatically.
+The `render.yaml` at the repo root configures both services automatically: the
+FastAPI backend and the Angular app, server-rendered by its own Express server.
 
-1. Connect the `employee-intelligence/knowledge-assistant` repo to Render
-2. Set `NVIDIA_API_KEY` and `NVIDIA_EMBEDDING_API_KEY` in the Render dashboard
-3. Render provisions the database and injects `DATABASE_URL` automatically
+1. Connect the `knowledge-assistant` repo to Render
+2. Set `NVIDIA_API_KEY`, `NVIDIA_EMBEDING_API_KEY`, `AUTH_SECRET_KEY`,
+   `AUTH_BOOTSTRAP_KEY` and `DATABASE_URL` in the Render dashboard — everything
+   else in the blueprint is already set
+3. Create the first administrator with `python -m app.bootstrap_admin`, then remove
+   `AUTH_BOOTSTRAP_KEY`
+
+The app serves its own `/api`, so `config.json` is `""` and the browser only ever
+calls the app's address:
+
+- `API_ORIGIN` on the app service is the backend, and is what the proxy forwards to.
+- `ALLOWED_ORIGINS` and `CSRF_TRUSTED_ORIGINS` govern CORS and the CSRF origin
+  check. Neither needs the app's own origin listed: the request reaches the backend
+  naming the host it was sent to, which the backend recognises as its own. They still
+  matter for anything calling the backend directly.
+- `FRONTEND_BASE_URL` is where invitation links point.
+
+`render.yaml` sets all of these, including `API_ORIGIN`. Nothing has to be read off
+the service page after the first deploy, which is the point: an allow-list that has
+to name the address you are already at is one more thing that can be wrong, and a
+403 on the first write when it is.
+
+### Do not set NODE_ENV=production on the frontend service
+
+It breaks the build, in a way that looks like a broken toolchain rather than a
+missing variable. `npm install` and `npm ci` both skip `devDependencies` when
+`NODE_ENV=production`, and `@angular/cli` is one, so the install succeeds and quietly
+removes the tool the build needs:
+
+```
+removed 263 packages, and audited 99 packages in 917ms
+> ng build
+sh: 1: ng: not found
+```
+
+Nothing in the server needs the variable — `API_ORIGIN` is read directly, so behaviour
+is identical with and without it. `scripts/check_build_env.mjs` runs before the build
+and explains this rather than leaving "command not found", but the fix is to leave
+`NODE_ENV` unset.
+
+### A 500 from every /api route means API_ORIGIN
+
+The frontend serves `/api` itself, and if it cannot tell where the backend is, every
+call in the app fails while the rest of the app looks fine — SSR and static assets
+answer `200` because they never touch the proxy. That is a distinctive signature:
+
+```
+/api/auth/me           500
+/api/conversations     500
+/                      200
+```
+
+The service log holds the literal `API_ORIGIN is not set`. Note that a service created
+before a key was added to `render.yaml` never receives it, because a blueprint only
+applies env vars when it creates or re-syncs the service — so set it in the dashboard
+and check the build command matches the blueprint's `npm ci && npm run build`.
 
 ## API Docs
 

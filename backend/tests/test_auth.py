@@ -452,6 +452,162 @@ class TokenAndCookieTest(AuthTestCase):
         finally:
             settings.environment = original
 
+    def test_cookies_are_lax_by_default_so_they_are_first_party(self) -> None:
+        """`SameSite=lax`, because the app and the API share one origin.
+
+        The frontend serves its own `/api` reverse proxy, so every browser request
+        is same-site and the cookies are first-party. `lax` is what makes that
+        sufficient.
+
+        `none` is the value that breaks it: it makes the cookies third-party, which
+        is what browsers are progressively refusing to send, so a deployment using
+        it works in a desktop browser and fails in a mobile one with nothing in the
+        app changed to account for it.
+        """
+        original_samesite = settings.auth_cookie_samesite
+        original_secure = settings.auth_cookie_secure
+        try:
+            # Absent from the environment, which is how most deployments run it.
+            settings.auth_cookie_samesite = ""
+            settings.auth_cookie_secure = False
+            self.assertEqual(settings.cookie_samesite, "lax")
+
+            # Set the way a copy from an older cross-origin deployment would set it,
+            # case and all. Only honoured alongside `Secure`, which is the condition
+            # browsers actually impose.
+            settings.auth_cookie_samesite = "None"
+            settings.auth_cookie_secure = True
+            self.assertEqual(settings.cookie_samesite, "none")
+
+            # An unrecognised value falls back rather than issuing cookies whose
+            # attributes nothing can predict.
+            settings.auth_cookie_samesite = "something-else"
+            self.assertEqual(settings.cookie_samesite, "lax")
+        finally:
+            settings.auth_cookie_samesite = original_samesite
+            settings.auth_cookie_secure = original_secure
+
+    def test_samesite_none_without_secure_falls_back_to_lax(self) -> None:
+        """Every browser drops a `SameSite=None` cookie that is not also `Secure`.
+
+        Silently, and with a 200 to show for it — so without this the cookies would
+        be issued, stored nowhere, and sign-in would report that the browser had
+        not kept the session.
+        """
+        original_samesite = settings.auth_cookie_samesite
+        original_secure = settings.auth_cookie_secure
+        settings.auth_cookie_samesite = "none"
+        settings.auth_cookie_secure = False
+        settings.environment = "development"
+        try:
+            self.assertEqual(settings.cookie_samesite, "lax")
+        finally:
+            settings.auth_cookie_samesite = original_samesite
+            settings.auth_cookie_secure = original_secure
+
+    def test_this_services_own_origin_is_always_allowed(self) -> None:
+        """A request from our own origin needs no allow-list entry.
+
+        The frontend serves its own `/api` reverse proxy and presents each request
+        to us as same-origin, so that is what every proxied call looks like from
+        here. Requiring it to be listed as well meant each deployment had to name
+        an address it already was — the deployed hostname, a LAN address for a
+        phone, a new one each time a host generated a service name — and a wrong
+        one produced a 403 on the first write with nothing pointing at the setting
+        that was wrong.
+        """
+        client = self.new_client()
+        self.invite_and_accept(client, f"ama@{COMPANY}")
+
+        # The origin this test client is talking to.
+        own_origin = str(client.base_url).rstrip("/")
+
+        response = client.post(
+            "/api/conversations",
+            json={"client_id": "1" * 12},
+            headers={"Origin": own_origin, **self.csrf_headers(client)},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_our_own_origin_is_matched_by_host_not_by_scheme(self) -> None:
+        """A provider terminating TLS in front of the container still counts as us.
+
+        Render — and most hosts — accept TLS on a proxy and forward to the container
+        over plain http, so the scheme this process sees is `http` while the browser
+        sent `https`. Comparing whole origins rejected every proxied write on
+        exactly the deployments the app's own `/api` proxy exists to fix, and the
+        refusal named an origin that looked correct.
+
+        The `Secure` cookie flag and HSTS are what keep a session off plain http.
+        The host is what identifies "this is us".
+        """
+        client = self.new_client()
+        self.invite_and_accept(client, f"ama@{COMPANY}")
+
+        # `TestClient` addresses itself as `testserver`, which is what the `Host`
+        # header carries too.
+        response = client.post(
+            "/api/conversations",
+            json={"client_id": "1" * 12},
+            headers={
+                # Same host as the request, opposite scheme.
+                "Origin": "http://testserver",
+                **self.csrf_headers(client),
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_someone_elses_host_is_still_refused(self) -> None:
+        """The leniency above is about our own host, not about schemes generally."""
+        client = self.new_client()
+        self.invite_and_accept(client, f"ama@{COMPANY}")
+
+        response = client.post(
+            "/api/conversations",
+            json={"client_id": "1" * 12},
+            headers={
+                "Origin": f"http://evil.example",
+                **self.csrf_headers(client),
+            },
+        )
+
+        self.assertEqual(response.status_code, 403, response.text)
+
+    def test_a_refused_origin_is_named_in_the_refusal(self) -> None:
+        """A 403 about the wrong origin has to say which origin it was.
+
+        `SameSite` and origins are the two ways a session silently fails to attach,
+        and a bare "not from an allowed origin" is indistinguishable from a CSRF
+        token problem — so it sends people to look at the interceptor instead of
+        at the one setting that is wrong.
+
+        Tried on `POST /api/conversations` rather than on a sign-in route, because
+        every route reached before a session exists is exempt from the origin check
+        (there are no cookies to ride at that point) — which is also why a wrong
+        origin used to show up as a silent sign-in failure rather than as this 403.
+        """
+        client = self.new_client()
+        self.invite_and_accept(client, f"ama@{COMPANY}")
+
+        headers = self.csrf_headers(client)
+        headers["Origin"] = "https://somewhere-else.example"
+
+        response = client.post(
+            "/api/conversations",
+            json={"client_id": "1" * 12},
+            headers=headers,
+        )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertIn("somewhere-else.example", response.json()["detail"])
+        self.assertIn("CSRF_TRUSTED_ORIGINS", response.json()["detail"])
+
+        # And it must not be mistaken for the retryable CSRF-token refusal, or the
+        # interceptor would loop on a request that is never going to be accepted.
+        self.assertNotIn("CSRF token", response.json()["detail"])
+
     def test_the_csrf_cookie_is_the_only_one_javascript_may_read(self) -> None:
         csrf_header = self.cookie_header(self.new_client().get("/api/auth/csrf"), CSRF_COOKIE)
 
@@ -1055,9 +1211,105 @@ class AccessRequestTest(AuthTestCase):
             "/api/auth/login", json={"email": f"newcomer@{COMPANY}", "password": PASSWORD}
         )
 
-        # No user row exists until approval, so this answers like a wrong password.
-        self.assertEqual(response.status_code, 401)
+        # The password was right, so the answer is "waiting", not a refusal. This used
+        # to be a 401 with the wrong-password wording, which told somebody their
+        # password did not match when it matched perfectly.
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["status"], "pending")
+
+        # Still no session, and still no account: a request remains a request. Only the
+        # answer changed, not what it grants.
         self.assertIsNone(self.stored_user(f"newcomer@{COMPANY}"))
+        self.assertNotIn(ACCESS_COOKIE, self.new_client().cookies)
+
+    def test_a_pending_request_is_not_a_way_to_enumerate_accounts(self) -> None:
+        """The waiting answer is only sent once the password has verified.
+
+        This is the whole reason it is safe to distinguish "waiting" from "refused" at
+        all: an attacker who does not have the password still cannot tell whether an
+        address has asked to join, because they get the identical generic refusal a
+        never-seen address gets.
+        """
+        self.asks_for(self.new_client())
+
+        pending_wrong_password = self.new_client().post(
+            "/api/auth/login", json={"email": f"newcomer@{COMPANY}", "password": "wrong-one-1!"}
+        )
+        never_registered = self.new_client().post(
+            "/api/auth/login", json={"email": f"stranger@{COMPANY}", "password": "wrong-one-1!"}
+        )
+
+        # Byte-for-byte the same answer, so the two cannot be told apart from outside.
+        self.assertEqual(pending_wrong_password.status_code, 401)
+        self.assertEqual(pending_wrong_password.json(), never_registered.json())
+        self.assertEqual(
+            pending_wrong_password.json()["detail"],
+            "That email and password do not match an account.",
+        )
+
+    def test_the_waiting_answer_names_no_role_nobody_granted(self) -> None:
+        """A request nobody has decided cannot report what it will be given.
+
+        The role is chosen on approval and nowhere else, so naming one here would be a
+        claim about a decision that has not happened.
+        """
+        self.asks_for(self.new_client())
+
+        response = self.new_client().post(
+            "/api/auth/login", json={"email": f"newcomer@{COMPANY}", "password": PASSWORD}
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertIsNone(response.json()["requested_role"])
+        # The name is safe to echo: the caller just proved the account is theirs.
+        self.assertEqual(response.json()["name"], "Kofi Mensah")
+
+    def test_a_deactivated_account_is_waiting_rather_than_refused(self) -> None:
+        """An administrator switching an account off must not read as a bad password.
+
+        Distinct from a pending request: the row and the password both exist, so the
+        correct password can be verified and there is nothing to be vague about.
+        """
+        self.invite_and_accept(self.new_client(), f"ama@{COMPANY}")
+        admin = self.signed_in_admin()
+        user_id = self.stored_user(f"ama@{COMPANY}").id
+
+        deactivated = admin.patch(
+            f"/api/auth/users/{user_id}",
+            json={"is_active": False},
+            headers=self.csrf_headers(admin),
+        )
+        self.assertEqual(deactivated.status_code, 200, deactivated.text)
+
+        response = self.new_client().post(
+            "/api/auth/login", json={"email": f"ama@{COMPANY}", "password": PASSWORD}
+        )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["requested_role"], "employee")
+        self.assertNotIn(ACCESS_COOKIE, self.new_client().cookies)
+
+    def test_a_pending_invitation_still_gets_the_generic_refusal(self) -> None:
+        """An invitation nobody has accepted has no password to have got right.
+
+        So there is nothing to verify, and nothing may be said: this is the one
+        not-switched-on case that has to keep answering like a wrong password.
+        """
+        self.signed_in_admin()
+        self.new_client().post(
+            "/api/auth/invite",
+            json={"name": "Ama Konadu", "email": f"ama@{COMPANY}", "role": "employee"},
+            headers=self.csrf_headers(self.new_client()),
+        )
+
+        response = self.new_client().post(
+            "/api/auth/login", json={"email": f"ama@{COMPANY}", "password": PASSWORD}
+        )
+
+        self.assertEqual(response.status_code, 401, response.text)
+        self.assertEqual(
+            response.json()["detail"], "That email and password do not match an account."
+        )
 
     def test_a_weak_password_is_refused(self) -> None:
         response = self.asks_for(self.new_client(), password="abc")
@@ -1511,3 +1763,273 @@ class AccountCreationTests(AuthTestCase):
 
         self.assertNotEqual(stored.password_hash, self.PASSWORD)
         self.assertTrue(stored.is_active)
+
+
+class UserManagementTest(AuthTestCase):
+    def create_employee(self, email: str, client=None) -> dict:
+        return self.invite_and_accept(
+            client or self.new_client(), email, role="employee"
+        )
+
+    def test_admin_lists_every_account_paged(self):
+        admin = self.signed_in_admin()
+        self.create_employee(f"ama@{COMPANY}")
+        self.create_employee(f"kofi@{COMPANY}")
+
+        response = admin.get("/api/auth/users?page=1")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["total"], 3)
+        self.assertEqual(body["page"], 1)
+        self.assertEqual(body["per_page"], 10)
+        self.assertEqual(body["pages"], 1)
+        self.assertEqual(len(body["users"]), 3)
+
+    def test_employee_is_refused_the_list(self):
+        self.signed_in_admin()
+        employee = self.new_client()
+        self.invite_and_accept(employee, f"ama@{COMPANY}")
+
+        self.assertEqual(employee.get("/api/auth/users").status_code, 403)
+
+    def test_admin_can_make_an_employee_an_admin(self):
+        admin = self.signed_in_admin()
+        user = self.create_employee(f"ama@{COMPANY}")
+
+        response = admin.patch(
+            f"/api/auth/users/{user['id']}",
+            json={"role": "admin"},
+            headers=self.csrf_headers(admin),
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["role"], "admin")
+        self.assertEqual(self.stored_user(f"ama@{COMPANY}").role, "admin")
+
+    def test_admin_cannot_demote_themselves(self):
+        admin = self.signed_in_admin()
+        admin_id = admin.get("/api/auth/me").json()["id"]
+
+        response = admin.patch(
+            f"/api/auth/users/{admin_id}",
+            json={"role": "employee"},
+            headers=self.csrf_headers(admin),
+        )
+
+        self.assertEqual(response.status_code, 409, response.text)
+
+    def test_admin_cannot_take_an_address_in_use(self):
+        admin = self.signed_in_admin()
+        user = self.create_employee(f"ama@{COMPANY}")
+
+        response = admin.patch(
+            f"/api/auth/users/{user['id']}",
+            json={"email": f"admin@{COMPANY}"},
+            headers=self.csrf_headers(admin),
+        )
+
+        self.assertEqual(response.status_code, 409, response.text)
+
+    def test_reset_password_signs_in_with_the_new_one(self):
+        admin = self.signed_in_admin()
+        user = self.create_employee(f"ama@{COMPANY}")
+
+        response = admin.post(
+            f"/api/auth/users/{user['id']}/password",
+            json={"password": "brand-new-password-1!"},
+            headers=self.csrf_headers(admin),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        employee = self.new_client()
+        self.assertEqual(
+            employee.post(
+                "/api/auth/login",
+                json={"email": f"ama@{COMPANY}", "password": "brand-new-password-1!"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.new_client().post(
+                "/api/auth/login",
+                json={"email": f"ama@{COMPANY}", "password": PASSWORD},
+            ).status_code,
+            401,
+        )
+
+    def test_delete_removes_the_account_and_its_access(self):
+        admin = self.signed_in_admin()
+        user = self.create_employee(f"ama@{COMPANY}")
+
+        response = admin.delete(
+            f"/api/auth/users/{user['id']}", headers=self.csrf_headers(admin)
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(self.stored_user(f"ama@{COMPANY}"))
+
+        self.assertEqual(
+            self.new_client().post(
+                "/api/auth/login",
+                json={"email": f"ama@{COMPANY}", "password": PASSWORD},
+            ).status_code,
+            401,
+        )
+
+    def test_admin_cannot_delete_themselves(self):
+        admin = self.signed_in_admin()
+        admin_id = admin.get("/api/auth/me").json()["id"]
+
+        response = admin.delete(
+            f"/api/auth/users/{admin_id}", headers=self.csrf_headers(admin)
+        )
+
+        self.assertEqual(response.status_code, 409, response.text)
+
+    def test_unknown_account_is_a_404(self):
+        admin = self.signed_in_admin()
+
+        self.assertEqual(
+            admin.get("/api/auth/users?page=99").status_code, 200
+        )
+        self.assertEqual(
+            admin.patch(
+                "/api/auth/users/no-such-id",
+                json={"role": "admin"},
+                headers=self.csrf_headers(admin),
+            ).status_code,
+            404,
+        )
+
+
+class ChangeOwnPasswordTest(AuthTestCase):
+    """POST /api/auth/me/password: anybody signed in changes their own password.
+
+    The current password proves possession, so a session left open cannot be used
+    to lock its owner out. Employees reach this exactly as administrators do —
+    there is no role on the route.
+    """
+
+    NEW_PASSWORD = "a-brand-new-password-1!"
+
+    def change(
+        self, client: TestClient, current: str = PASSWORD, new: str = NEW_PASSWORD
+    ):
+        return client.post(
+            "/api/auth/me/password",
+            json={"current_password": current, "new_password": new},
+            headers=self.csrf_headers(client),
+        )
+
+    def test_employee_changes_their_own_password(self) -> None:
+        self.signed_in_admin()
+        employee = self.new_client()
+        self.invite_and_accept(employee, f"ama@{COMPANY}")
+
+        response = self.change(employee)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("password", response.json())
+
+        # The new password signs in and the old one no longer does.
+        self.assertEqual(
+            self.new_client()
+            .post(
+                "/api/auth/login",
+                json={"email": f"ama@{COMPANY}", "password": self.NEW_PASSWORD},
+            )
+            .status_code,
+            200,
+        )
+        self.assertEqual(
+            self.new_client()
+            .post(
+                "/api/auth/login",
+                json={"email": f"ama@{COMPANY}", "password": PASSWORD},
+            )
+            .status_code,
+            401,
+        )
+
+    def test_admin_uses_the_same_route(self) -> None:
+        admin = self.signed_in_admin()
+
+        response = self.change(admin)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            self.new_client()
+            .post(
+                "/api/auth/login",
+                json={"email": f"admin@{COMPANY}", "password": self.NEW_PASSWORD},
+            )
+            .status_code,
+            200,
+        )
+
+    def test_wrong_current_password_is_refused_and_changes_nothing(self) -> None:
+        self.signed_in_admin()
+        employee = self.new_client()
+        self.invite_and_accept(employee, f"ama@{COMPANY}")
+
+        response = self.change(employee, current="not-the-password-1!")
+
+        self.assertEqual(response.status_code, 401, response.text)
+
+        # The old password still works: a refused attempt changed nothing.
+        self.assertEqual(
+            self.new_client()
+            .post(
+                "/api/auth/login",
+                json={"email": f"ama@{COMPANY}", "password": PASSWORD},
+            )
+            .status_code,
+            200,
+        )
+
+    def test_weak_new_password_is_refused(self) -> None:
+        self.signed_in_admin()
+        employee = self.new_client()
+        self.invite_and_accept(employee, f"ama@{COMPANY}")
+
+        self.assertEqual(self.change(employee, new="short").status_code, 422)
+
+    def test_same_password_is_refused_and_changes_nothing(self) -> None:
+        self.signed_in_admin()
+        employee = self.new_client()
+        self.invite_and_accept(employee, f"ama@{COMPANY}")
+
+        response = self.change(employee, current=PASSWORD, new=PASSWORD)
+
+        self.assertEqual(response.status_code, 422, response.text)
+
+        # Still the same password: the refused attempt changed nothing.
+        self.assertEqual(
+            self.new_client()
+            .post(
+                "/api/auth/login",
+                json={"email": f"ama@{COMPANY}", "password": PASSWORD},
+            )
+            .status_code,
+            200,
+        )
+
+    def test_signed_out_is_refused(self) -> None:
+        response = self.new_client().post(
+            "/api/auth/me/password",
+            json={"current_password": PASSWORD, "new_password": self.NEW_PASSWORD},
+        )
+
+        self.assertEqual(response.status_code, 401, response.text)
+
+    def test_requires_the_csrf_header(self) -> None:
+        self.signed_in_admin()
+        employee = self.new_client()
+        self.invite_and_accept(employee, f"ama@{COMPANY}")
+
+        response = employee.post(
+            "/api/auth/me/password",
+            json={"current_password": PASSWORD, "new_password": self.NEW_PASSWORD},
+        )
+
+        self.assertEqual(response.status_code, 403, response.text)

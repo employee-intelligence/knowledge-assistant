@@ -11,16 +11,36 @@ import { toSignal } from '@angular/core/rxjs-interop';
 import {
   ActivatedRouteSnapshot,
   NavigationEnd,
+  NavigationError,
   NavigationSkipped,
   Router,
   RouterOutlet,
 } from '@angular/router';
-import { scan, startWith } from 'rxjs';
+import { filter, scan, startWith } from 'rxjs';
 
 import { ChatSidebarComponent } from './features/chat/components/chat-sidebar/chat-sidebar.component';
-import { LayoutService } from './core/services/layout.service';
 import { AuthService } from './core/services/auth.service';
-import { LoadingIndicatorComponent } from './shared/components/loading-indicator/loading-indicator.component';
+import { LayoutService } from './core/services/layout.service';
+
+/** Marked in the tab once a stale-bundle reload has been attempted. */
+const STALE_BUNDLE_RELOAD_KEY = 'ika.reloadedForStaleBundle';
+
+/**
+ * Whether a failed navigation means the running code is older than its chunks.
+ *
+ * Deploys replace the hashed chunk files, so a tab opened before one that only
+ * navigates after it fetches files that no longer exist — and the server answers
+ * those with the app shell instead of JavaScript. The button that was clicked
+ * then does nothing, with the real cause only in the console. The recovery is a
+ * single full reload, which fetches the current shell and its matching chunks.
+ */
+function isStaleBundleError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+
+  return /Failed to fetch dynamically imported module|Loading chunk [\w-]+ failed/i.test(
+    message,
+  );
+}
 
 /** Elements that can hold focus, used by the drawer's focus trap. */
 const FOCUSABLE_SELECTOR =
@@ -56,7 +76,7 @@ const FOCUSABLE_SELECTOR =
 @Component({
   selector: 'app-root',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [ChatSidebarComponent, LoadingIndicatorComponent, RouterOutlet],
+  imports: [ChatSidebarComponent, RouterOutlet],
   host: {
     '(keydown.tab)': 'onTab($event)',
   },
@@ -70,7 +90,37 @@ const FOCUSABLE_SELECTOR =
       Skip to content
     </a>
 
-    <div class="flex h-dvh overflow-hidden bg-background">
+    <!--
+      Until the app knows who is signed in, nothing that depends on knowing is drawn.
+
+      A refresh starts with no user and no answer, and every question the shell asks
+      about the role is answered "no" in the meantime. That is what put a
+      non-administrator's sidebar on screen for a frame before the dashboard
+      appeared: the navigation was right, and everything inside it was drawn from a
+      role that had not arrived yet.
+
+      A loading card rather than a wrong screen. It is the only state here that is
+      true — somebody is signed in, and the answer is on its way.
+    -->
+    @if (resolving()) {
+      <div class="flex h-dvh items-center justify-center bg-background px-6" role="status">
+        <div
+          class="flex w-full max-w-sm flex-col gap-3 rounded-lg border border-border bg-card p-6"
+        >
+          <div class="flex items-center gap-3">
+            <div class="size-9 shrink-0 rounded-full bg-muted"></div>
+            <div class="flex-1">
+              <div class="h-3.5 w-32 rounded bg-muted"></div>
+              <div class="mt-2 h-2.5 w-48 rounded bg-muted"></div>
+            </div>
+          </div>
+          <div class="h-2.5 w-full rounded bg-muted"></div>
+          <div class="h-2.5 w-2/3 rounded bg-muted"></div>
+          <span class="sr-only">Loading your account.</span>
+        </div>
+      </div>
+    } @else {
+      <div class="flex h-dvh overflow-hidden bg-background">
       <!--
         Neither the backdrop nor the sidebar is rendered on a signed-out screen.
 
@@ -121,41 +171,30 @@ const FOCUSABLE_SELECTOR =
         [class.lg:pl-rail]="layout.isRail() && !isPlain()"
         [class.lg:pl-0]="isPlain()"
       >
-        <!--
-          While the one startup auth check has not settled, neither screen may
-          render: the sign-in screen would be a flash for a signed-in person
-          refreshing, and a protected page would be one for a signed-out visitor
-          deep-linking. The app initializer normally settles this before the
-          first navigation, so this is the backstop for any path that reaches the
-          shell first — it shows a spinner, never a guess.
-        -->
-        @if (!authReady()) {
-          <div
-            class="flex flex-1 items-center justify-center"
-            role="status"
-            aria-label="Checking your session"
-          >
-            <app-loading-indicator label="Checking your session" [showDots]="false" />
-          </div>
-        } @else {
-          <router-outlet />
-        }
+        <router-outlet />
       </main>
     </div>
+    }
   `,
 })
 export class AppComponent {
   /** Responsive shell state: breakpoints, collapse preference and drawer. */
   protected readonly layout = inject(LayoutService);
 
-  /**
-   * Whether the startup auth check has settled. While false the shell shows a
-   * spinner instead of the routed view, so no refresh can flash the wrong
-   * screen in either direction.
-   */
-  protected readonly authReady = inject(AuthService).initialized;
-
   private readonly router = inject(Router);
+
+  /** Who is signed in, which is not known until the first answer arrives. */
+  private readonly auth = inject(AuthService);
+
+  /**
+   * Whether the answer about the signed-in person is still on its way.
+   *
+   * Only for the browser. A server render has nobody to ask and no cookie to read, so
+   * waiting there would hold the whole page on a card nobody will ever replace.
+   */
+  protected readonly resolving = computed(
+    () => this.auth.isBrowserOnly() && this.auth.status() === 'unknown' && !this.isPlain(),
+  );
 
   /**
    * Whether the routed view stands on its own, with "not known yet" counted as yes.
@@ -242,6 +281,25 @@ export class AppComponent {
   private wasDrawerModal = false;
 
   constructor() {
+    // A navigation that dies on a missing chunk recovers with one full reload.
+    // Seen in the wild as buttons that go nowhere after a deploy replaced the
+    // hashed files underneath an open tab. Once per tab, so a genuinely broken
+    // deployment cannot trap the browser in a reload loop.
+    this.router.events
+      .pipe(filter((event): event is NavigationError => event instanceof NavigationError))
+      .subscribe((event) => {
+        if (typeof window === 'undefined' || typeof sessionStorage === 'undefined') {
+          return;
+        }
+
+        if (!isStaleBundleError(event.error) || sessionStorage.getItem(STALE_BUNDLE_RELOAD_KEY)) {
+          return;
+        }
+
+        sessionStorage.setItem(STALE_BUNDLE_RELOAD_KEY, '1');
+        window.location.reload();
+      });
+
     // A modal drawer has to take focus, or the trap below never engages: it only
     // rewrites Tab at the drawer's first and last control, which focus never
     // reaches if it is still out in the content behind the backdrop. Closing it

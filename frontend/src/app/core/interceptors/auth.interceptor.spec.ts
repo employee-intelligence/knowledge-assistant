@@ -33,10 +33,8 @@ describe('authInterceptor', () => {
   beforeEach(async () => {
     // Cleared between tests, because `document.cookie` outlives the injector and a
     // token left behind by one test would silently satisfy the next one's assertion.
+    // The remembered session in storage outlives it too, for the same reason.
     document.cookie = 'ika_csrf=; path=/; max-age=0';
-
-    // The service now remembers who signed in: without this, one test's session
-    // would still be cached when the next test's fresh service starts.
     localStorage.clear();
 
     await TestBed.configureTestingModule({
@@ -50,6 +48,50 @@ describe('authInterceptor', () => {
     http = TestBed.inject(HttpTestingController);
     router = TestBed.inject(Router);
     client = TestBed.inject(HttpClient);
+  });
+
+  it('refreshes a rotated token and sends the request once more', async () => {
+    // The cookie is replaced server-side whenever the session changes, so a token read
+    // before signing in is stale and the browser pairs a new cookie with an old header.
+    // The server cannot tell that from a forged request, so the tab recovers: refresh,
+    // wait for the new cookie, try again. Once.
+    setCsrfCookie('stale-token');
+    client.post(`${API_BASE_URL}/api/conversations`, {}).subscribe();
+
+    const first = http.expectOne(`${API_BASE_URL}/api/conversations`);
+    expect(first.request.headers.get('X-CSRF-Token')).toBe('stale-token');
+
+    // The browser's cookie is replaced when the refresh lands.
+    first.flush(
+      { detail: 'This request is missing a valid CSRF token.' },
+      { status: 403, statusText: 'Forbidden' },
+    );
+
+    // The browser stores the new cookie as the refresh lands. Set before flushing,
+    // because that is the moment it happens, and the retry reads it on the far side.
+    setCsrfCookie('fresh-token');
+    http.expectOne(`${API_BASE_URL}/api/auth/csrf`).flush({ csrf_token: 'fresh-token' });
+
+    const retry = http.expectOne(`${API_BASE_URL}/api/conversations`);
+
+    // The new value, which is only knowable after the refresh completed. Reading the
+    // cookie as soon as the refresh was fired gets the one that was just refused.
+    expect(retry.request.headers.get('X-CSRF-Token')).toBe('fresh-token');
+    retry.flush({ id: 'c1' });
+  });
+
+  it('does not retry a 403 that is about permission rather than the token', () => {
+    // An employee reaching an administrator's route must get one refusal, not two
+    // attempts — and a request with a side effect must never be repeated on a
+    // refusal that has nothing to do with the token.
+    setCsrfCookie('token-from-the-cookie');
+    client.post(`${API_BASE_URL}/api/auth/users`, {}).subscribe({ error: () => undefined });
+
+    const request = http.expectOne(`${API_BASE_URL}/api/auth/users`);
+    request.flush({ detail: 'Not an administrator.' }, { status: 403, statusText: 'Forbidden' });
+
+    http.expectNone(`${API_BASE_URL}/api/auth/csrf`);
+    http.expectNone(`${API_BASE_URL}/api/auth/users`);
   });
 
   it('puts the CSRF token on a state-changing request', () => {
@@ -194,9 +236,34 @@ describe('authInterceptor', () => {
     await settle();
 
     // The session is over, so whatever was on screen belonged to it and is no
-    // longer visible.
-    expect(navigate).toHaveBeenCalledWith(['/login']);
+    // longer visible. Where they were going is carried along, so signing in
+    // again continues there rather than dropping them on the dashboard.
+    expect(navigate).toHaveBeenCalledWith(['/login'], { queryParams: { returnUrl: '/' } });
     expect(TestBed.inject(AuthService).isAuthenticated()).toBe(false);
+  });
+
+  it('does not sign out when the refresh never reached the backend', async () => {
+    // A backend that is asleep or unreachable is not a session that ended. The
+    // request fails transiently and the session stands, so the next attempt —
+    // against a backend that has woken up since — can still refresh it.
+    setCsrfCookie('a-token');
+    await establishSession();
+
+    const navigate = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+    let failure: unknown;
+    client
+      .get(`${API_BASE_URL}/api/conversations?client_id=1`)
+      .subscribe({ error: (error: unknown) => (failure = error) });
+
+    http
+      .expectOne(`${API_BASE_URL}/api/conversations?client_id=1`)
+      .flush({ detail: 'expired' }, { status: 401, statusText: 'Unauthorized' });
+    http.expectOne(`${API_BASE_URL}/api/auth/refresh`).error(new ProgressEvent('error'));
+    await settle();
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(TestBed.inject(AuthService).isAuthenticated()).toBe(true);
+    expect(failure).toBeTruthy();
   });
 
   it('does not try to refresh a 401 from a request made while signed out', () => {
@@ -241,3 +308,4 @@ describe('authInterceptor', () => {
     http.expectNone(`${API_BASE_URL}/api/auth/refresh`);
   });
 });
+
