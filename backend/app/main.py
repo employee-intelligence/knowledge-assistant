@@ -138,6 +138,20 @@ def chat(
 
     assistant = state["assistant"]
 
+    # Most recent QA row in this session → feed its source topics to the
+    # conversational-reply prompt so follow-ups can suggest related topics
+    # without re-running retrieval.
+    recent_sources = None
+    last_qa = db.scalars(
+        select(QA)
+        .where(QA.session_id == req.session_id)
+        .order_by(QA.created_at.desc())
+        .limit(1)
+    ).first()
+    if last_qa and last_qa.sources:
+        srcs = last_qa.sources if isinstance(last_qa.sources, list) else json.loads(last_qa.sources)
+        recent_sources = [f"{s.get('document')} > {s.get('section')}" for s in srcs]
+
     async def event_stream():
         full_answer = []
         sources = []
@@ -145,7 +159,7 @@ def chat(
 
         # ask_stream is an async generator built on the async llama-index
         # APIs, so it runs directly on this event loop — no threads needed.
-        async for event in assistant.ask_stream(req.question):
+        async for event in assistant.ask_stream(req.question, recent_sources=recent_sources):
             if event["event"] == "sources":
                 sources = json.loads(event["data"])
             elif event["event"] == "token":
