@@ -4,18 +4,47 @@ from llama_index.llms.openai_like import OpenAILike
 
 from app.config import settings
 from app.rag.guard import is_personal_question
+from app.rag.intent import is_conversational
 import json
 
 # Standard responses used when the question can't or shouldn't be answered.
 FALLBACK_MSG = (
-    "I couldn't find that in the company documents. "
-    "Please contact HR at hr@acmetech.example or +233 30 000 0000."
+    "I couldn't find a clear answer to that in the company policy documents. "
+    "The topics I can help with include leave, payroll, working hours, "
+    "onboarding, IT & VPN setup, security & compliance, and the code of "
+    "conduct — try rephrasing your question along those lines. If it's still "
+    "not answered, please contact HR at hr@acmetech.example or +233 30 000 0000."
 )
 PERSONAL_MSG = (
     "I can only answer general policy questions and I can't access personal "
     "records such as leave balances, salaries or payslips. Please check the HR "
     "self-service portal on the intranet, or contact HR at hr@acmetech.example."
 )
+
+# Used when the message is small talk / a conversational follow-up rather than
+# a policy question. Retrieval is skipped; the LLM answers naturally but must
+# never state specific policy facts — those still require a real policy question.
+CHAT_PROMPT = """You are the Internal Knowledge Assistant for Acme Technologies.
+The user said something that is NOT a specific policy question — it is a greeting,
+small talk, thanks, or a conversational follow-up.
+
+Rules:
+- Never invent or recite specific policy facts (no numbers, dates, entitlements, processes).
+- If it's a greeting or thanks, reply with one short friendly sentence and mention you can answer questions about company policies (leave, payroll, working hours, onboarding, IT & VPN setup, security, code of conduct, and more).
+- If it's a follow-up like "anything else?" or "tell me more", offer 2-3 related things they could ask about. Prefer topics related to the recent sources below; phrase them as questions they could ask.
+- Keep it to at most 3 short sentences.
+
+Recent sources (topics covered earlier in this chat, may be empty):
+{recent_topics}
+
+User message: {question}
+Reply:"""
+
+
+def _chat_topics(recent_sources: list | None) -> str:
+    if not recent_sources:
+        return "(none)"
+    return "\n".join(f"- {s}" for s in recent_sources[:4])
 
 # This prompt forces the LLM to answer ONLY from retrieved context. The special
 # sentinel replies NOT_FOUND / PERSONAL let us distinguish "no answer found" and
@@ -64,9 +93,17 @@ pick    """
             is_chat_model=True,
         )
 
-    def ask(self, question: str) -> dict:
+    def ask(self, question: str, recent_sources: list | None = None) -> dict:
         if is_personal_question(question):
             return {"answer": PERSONAL_MSG, "answered": False, "confidence": 0.0, "sources": []}
+
+        if is_conversational(question):
+            text = self.llm.complete(
+                CHAT_PROMPT.format(
+                    recent_topics=_chat_topics(recent_sources), question=question
+                )
+            ).text.strip()
+            return {"answer": text, "answered": False, "confidence": 0.0, "sources": []}
 
         # Keep only chunks above the similarity threshold; if none qualify,
         # answer with the canned fallback instead of letting the LLM guess.
@@ -102,7 +139,7 @@ pick    """
         # Confidence = mean similarity of the retrieved chunks (proxy, not a calibrated probability).
         return {"answer": text, "answered": True, "confidence": confidence, "sources": sources}
 
-    async def ask_stream(self, question: str):
+    async def ask_stream(self, question: str, recent_sources: list | None = None):
         """Stream the LLM response as SSE events (async generator).
 
         Uses the async llama-index APIs (aretrieve / astream_complete). The sync
@@ -118,6 +155,23 @@ pick    """
         """
         if is_personal_question(question):
             yield {"event": "token", "data": PERSONAL_MSG}
+            yield {"event": "done", "data": json.dumps({"answered": False, "confidence": 0.0, "sources": []})}
+            return
+
+        if is_conversational(question):
+            try:
+                stream = await self.llm.astream_complete(
+                    CHAT_PROMPT.format(
+                        recent_topics=_chat_topics(recent_sources), question=question
+                    )
+                )
+                async for chunk in stream:
+                    token = chunk.delta
+                    if token:
+                        yield {"event": "token", "data": token}
+            except Exception as e:
+                yield {"event": "error", "data": str(e)}
+                return
             yield {"event": "done", "data": json.dumps({"answered": False, "confidence": 0.0, "sources": []})}
             return
 
@@ -150,6 +204,9 @@ pick    """
         prompt = PROMPT.format(context=context, question=question)
 
         full_text = []
+        # Buffer tokens until we can rule out the NOT_FOUND/PERSONAL sentinels,
+        # otherwise the raw sentinel text leaks into the client stream.
+        pending = []
         try:
             stream = await self.llm.astream_complete(prompt)
             async for chunk in stream:
@@ -157,10 +214,24 @@ pick    """
                 if not token:
                     continue
                 full_text.append(token)
-                yield {"event": "token", "data": token}
+                pending.append(token)
+                candidate = "".join(pending).strip()
+                is_sentinel_prefix = any(
+                    s.startswith(candidate) for s in ("NOT_FOUND", "PERSONAL")
+                ) and len(candidate) <= len("NOT_FOUND")
+                if not is_sentinel_prefix:
+                    for t in pending:
+                        yield {"event": "token", "data": t}
+                    pending = []
         except Exception as e:
             yield {"event": "error", "data": str(e)}
             return
+
+        # If the stream ended while we were still buffering, the whole response
+        # is a (short) sentinel or a short answer — flush leftovers accordingly.
+        leftover = "".join(pending).strip()
+        if leftover and leftover not in ("NOT_FOUND", "PERSONAL"):
+            yield {"event": "token", "data": "".join(pending)}
 
         text = "".join(full_text).strip()
 
